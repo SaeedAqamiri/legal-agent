@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "legal-agent-core"
+version = "0.1.0"
+description = "ADR-driven domain core for a temporal, agentic legal research system"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "Legal Agent Team" }]
+dependencies = []
+
+[project.optional-dependencies]
+falkordb = ["FalkorDB>=1.6,<2"]
+falkordb-lite = ["falkordblite>=0.10; platform_system != 'Windows' and python_version >= '3.12'"]
+postgres = ["psycopg[binary]>=3.2,<4"]
+api = ["fastapi>=0.115,<1", "uvicorn>=0.32,<1"]
+dev = ["ruff>=0.16,<1", "httpx2>=2,<3"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+legal_agent_core = ["db/migrations/*.sql", "ui/*"]

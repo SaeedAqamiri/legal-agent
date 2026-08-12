@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#173f38">
+    <title>رهنما — دستیار پژوهش حقوقی</title>
+    <link rel="stylesheet" href="/ui/styles.css">
+    <script src="/ui/app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="/workspace" aria-label="رهنما، صفحه اصلی">
+          <span class="brand-mark" aria-hidden="true">ر</span>
+          <span><strong>رهنما</strong><small>پژوهش حقوقی مستند</small></span>
+        </a>
+
+        <nav class="primary-nav" aria-label="بخش‌های سامانه">
+          <button class="nav-item is-active" type="button" data-panel="research-panel">
+            <span class="nav-icon" aria-hidden="true">⌕</span>
+            پژوهش جدید
+          </button>
+          <button class="nav-item" type="button" data-panel="library-panel">
+            <span class="nav-icon" aria-hidden="true">▤</span>
+            کتابخانه اسناد
+            <span class="nav-count" id="library-count">—</span>
+          </button>
+          <button class="nav-item" type="button" data-panel="trace-panel">
+            <span class="nav-icon" aria-hidden="true">⌘</span>
+            مسیر استدلال
+            <span class="nav-count" id="trace-count">۰</span>
+          </button>
+          <button class="nav-item" type="button" data-panel="review-panel">
+            <span class="nav-icon" aria-hidden="true">✓</span>
+            صف بازبینی
+            <span class="nav-count" id="review-count">—</span>
+          </button>
+        </nav>
+
+        <section class="session-card" aria-labelledby="session-title">
+          <div class="section-label" id="session-title">اتصال امن</div>
+          <label for="organization-id">سازمان</label>
+          <input id="organization-id" value="org-a" maxlength="200" spellcheck="false">
+          <label for="access-token">توکن دسترسی</label>
+          <div class="password-field">
+            <input id="access-token" type="password" autocomplete="current-password" placeholder="Bearer token">
+            <button id="toggle-token" type="button" aria-label="نمایش یا پنهان‌کردن توکن">نمایش</button>
+          </div>
+          <div class="connection-state" id="connection-state">
+            <span class="state-dot" aria-hidden="true"></span>
+            آماده اتصال
+          </div>
+          <p>توکن فقط در حافظه همین صفحه نگهداری می‌شود.</p>
+        </section>
+
+        <footer class="sidebar-footer">نسخه آزمایشی · Backend MVP</footer>
+      </aside>
+
+      <div class="workspace">
+        <header class="topbar">
+          <div>
+            <div class="eyebrow">سامانه پژوهش زمان‌مند</div>
+            <h1 id="page-title">پژوهش جدید</h1>
+          </div>
+          <div class="topbar-meta">
+            <span class="live-badge"><i></i> منبع‌محور</span>
+            <a href="/docs" target="_blank" rel="noreferrer">مستندات API</a>
+          </div>
+          <button class="mobile-session-button" id="open-mobile-session" type="button">اتصال</button>
+        </header>
+
+        <main>
+          <section class="panel is-active" id="research-panel" aria-labelledby="research-heading">
+            <div class="research-layout">
+              <div class="question-column">
+                <div class="intro-block">
+                  <span class="overline">پرونده پژوهشی</span>
+                  <h2 id="research-heading">مسئله حقوقی را دقیق مطرح کنید</h2>
+                  <p>پاسخ فقط پس از کنترل نسخه قانون، تاریخ قابلیت اعمال و اتصال ادعاها به منبع منتشر می‌شود.</p>
+                </div>
+
+                <form id="research-form" class="research-form">
+                  <label for="question">سؤال یا مسئله حقوقی</label>
+                  <textarea id="question" rows="6" maxlength="10000" required placeholder="برای مثال: مهلت قانونی اعتراض به رأی از چه تاریخی محاسبه می‌شود؟"></textarea>
+                  <div class="field-row">
+                    <div>
+                      <label for="applicable-time">تاریخ قابل اعمال</label>
+                      <input id="applicable-time" type="date" required>
+                    </div>
+                    <div>
+                      <label for="document-scope">محدوده اسناد <span>اختیاری</span></label>
+                      <input id="document-scope" placeholder="شناسه‌ها با ویرگول">
+                    </div>
+                  </div>
+                  <div class="form-footer">
+                    <div class="assurance"><span aria-hidden="true">◆</span> بررسی زمانی و استنادی خودکار</div>
+                    <button class="primary-button" id="research-submit" type="submit">
+                      <span>شروع پژوهش</span><b aria-hidden="true">←</b>
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              <aside class="case-summary" aria-label="راهنمای پژوهش">
+                <div class="summary-number">۰۱</div>
+                <h3>پیش از ارسال</h3>
+                <ul>
+                  <li><span>۱</span> موضوع و مرجع قانونی را تا حد ممکن مشخص کنید.</li>
+                  <li><span>۲</span> تاریخ واقعه یا تاریخ مورد سؤال را وارد کنید.</li>
+                  <li><span>۳</span> نقل‌قول‌ها و نسخه منبع را در پاسخ کنترل کنید.</li>
+                </ul>
+                <div class="summary-note"><strong>اصل انتشار</strong> ادعای بدون Evidence تأییدشده نمایش داده نمی‌شود.</div>
+              </aside>
+            </div>
+
+            <div class="result-area is-hidden" id="result-area" aria-live="polite">
+              <div class="result-heading">
+                <div>
+                  <span class="status-pill" id="result-status">تکمیل‌شده</span>
+                  <h2>نتیجه پژوهش</h2>
+                </div>
+                <div class="result-meta" id="result-meta"></div>
+              </div>
+              <article class="answer-card">
+                <div class="answer-copy" id="answer-copy"></div>
+                <div class="claim-list" id="claim-list"></div>
+              </article>
+              <section class="citations-section">
+                <div class="section-heading"><h3>منابع و ارجاعات</h3><span id="citation-count">۰ منبع</span></div>
+                <div class="citation-grid" id="citation-grid"></div>
+              </section>
+              <section class="issues-card is-hidden" id="issues-card">
+                <h3>موارد نیازمند بررسی</h3>
+                <div id="issues-list"></div>
+              </section>
+            </div>
+          </section>
+
+          <section class="panel" id="library-panel" aria-labelledby="library-heading">
+            <div id="library-browser">
+              <div class="panel-heading library-heading">
+                <div><span class="overline">Canonical library</span><h2 id="library-heading">کتابخانه اسناد حقوقی</h2><p>نسخه‌های سند، مواد و منبع ingestion‌شده را با تاریخ قابلیت اعمال جست‌وجو کنید.</p></div>
+              </div>
+              <form class="library-toolbar" id="library-form">
+                <div class="library-search">
+                  <label for="library-query">جست‌وجو در عنوان و متن مواد</label>
+                  <input id="library-query" placeholder="نام قانون، شماره ماده یا عبارت حقوقی">
+                </div>
+                <div>
+                  <label for="library-date">معتبر در تاریخ</label>
+                  <input id="library-date" type="date">
+                </div>
+                <button class="primary-button" id="library-submit" type="submit">جست‌وجو</button>
+              </form>
+              <div class="library-summary" id="library-summary">برای دریافت اسناد، جست‌وجو را اجرا کنید.</div>
+              <div class="empty-state" id="library-empty"><span aria-hidden="true">▤</span><h3>کتابخانه هنوز بارگذاری نشده است</h3><p>همه نسخه‌ها از گراف canonical خوانده می‌شوند و نتیجه به سازمان و تاریخ انتخاب‌شده محدود است.</p></div>
+              <div class="document-grid is-hidden" id="document-grid"></div>
+            </div>
+
+            <div class="document-viewer is-hidden" id="document-viewer">
+              <div class="viewer-toolbar">
+                <button class="back-button" id="close-document" type="button">→ بازگشت به کتابخانه</button>
+                <div class="viewer-actions">
+                  <span id="viewer-version"></span>
+                  <a class="secondary-button is-hidden" id="source-file-link" target="_blank" rel="noreferrer">فایل اصلی</a>
+                </div>
+              </div>
+              <header class="document-header">
+                <div><span class="overline" id="viewer-type">سند حقوقی</span><h2 id="viewer-title"></h2><p id="viewer-description"></p></div>
+                <div class="document-seal" aria-hidden="true">قانون</div>
+              </header>
+              <div class="viewer-layout">
+                <aside class="document-outline"><div class="section-label">فهرست مواد</div><nav id="document-outline" aria-label="فهرست مواد سند"></nav></aside>
+                <main class="document-canvas" id="document-canvas"></main>
+                <aside class="span-inspector">
+                  <div class="section-label">هویت منبع</div>
+                  <dl id="span-inspector"><div><dt>SourceSpan</dt><dd>یک بخش را انتخاب کنید</dd></div></dl>
+                  <p>Highlight دقیق از شناسه span، صفحه، بازه کاراکتری و bounding box منبع canonical ساخته می‌شود.</p>
+                </aside>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel" id="trace-panel" aria-labelledby="trace-heading">
+            <div class="panel-heading">
+              <div><span class="overline">Audit trail</span><h2 id="trace-heading">مسیر پژوهش و استدلال</h2></div>
+              <span class="episode-label" id="episode-label">هنوز پژوهشی اجرا نشده است</span>
+            </div>
+            <div class="empty-state" id="trace-empty">
+              <span aria-hidden="true">⌘</span><h3>مسیر پژوهش خالی است</h3><p>پس از اجرای یک سؤال، تمام گام‌ها و Evidenceها اینجا نمایش داده می‌شوند.</p>
+            </div>
+            <div class="trace-content is-hidden" id="trace-content">
+              <div class="metric-strip" id="trace-metrics"></div>
+              <div class="trace-columns">
+                <section><h3>رویدادهای پژوهش</h3><ol class="timeline" id="action-timeline"></ol></section>
+                <section><h3>دفتر شواهد</h3><div class="evidence-list" id="evidence-list"></div></section>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel" id="review-panel" aria-labelledby="review-heading">
+            <div class="panel-heading">
+              <div><span class="overline">Human in the loop</span><h2 id="review-heading">صف بازبینی دانش تدریجی</h2></div>
+              <button class="secondary-button" id="refresh-review" type="button">به‌روزرسانی صف</button>
+            </div>
+            <div class="review-guidance">این بخش فقط برای نقش «کارشناس حقوقی» یا «متولی دانش» قابل دسترسی است. تأیید شما یک رویداد audit تغییرناپذیر ایجاد می‌کند.</div>
+            <div class="empty-state" id="review-empty"><span aria-hidden="true">✓</span><h3>صف هنوز بارگذاری نشده است</h3><p>برای دریافت موارد منتظر بررسی، اتصال امن را تکمیل کنید.</p></div>
+            <div class="review-grid is-hidden" id="review-grid"></div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <dialog id="review-dialog">
+      <form method="dialog" id="review-form">
+        <input type="hidden" id="review-relation-id">
+        <input type="hidden" id="review-action">
+        <div class="dialog-head"><div><span class="overline">تصمیم کارشناسی</span><h2 id="dialog-title">تأیید رابطه</h2></div><button type="button" data-close-dialog aria-label="بستن">×</button></div>
+        <p id="dialog-description"></p>
+        <label for="review-note" id="review-note-label">یادداشت بازبینی</label>
+        <textarea id="review-note" rows="4" maxlength="4000"></textarea>
+        <div class="dialog-actions"><button class="secondary-button" type="button" data-close-dialog>انصراف</button><button class="primary-button" id="confirm-review" type="submit">ثبت تصمیم</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="mobile-session-dialog">
+      <form id="mobile-session-form">
+        <div class="dialog-head"><div><span class="overline">اتصال امن</span><h2>ورود به فضای سازمان</h2></div><button type="button" data-close-session aria-label="بستن">×</button></div>
+        <p>توکن فقط تا زمان بازبودن همین صفحه در حافظه نگهداری می‌شود.</p>
+        <label for="mobile-organization-id">سازمان</label>
+        <input id="mobile-organization-id" maxlength="200" value="org-a" spellcheck="false">
+        <label for="mobile-access-token">توکن دسترسی</label>
+        <input id="mobile-access-token" type="password" autocomplete="current-password" placeholder="Bearer token">
+        <div class="dialog-actions"><button class="secondary-button" type="button" data-close-session>انصراف</button><button class="primary-button" type="submit">ثبت اتصال</button></div>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>
