@@ -6,17 +6,21 @@ production composition root.
 
 from __future__ import annotations
 
+import os
 from datetime import date
 from itertools import count
+from typing import Any
 
 from fastapi import FastAPI
 
+from .agentic import LegalResearchTools, ToolResearchLoop
 from .answering import CitationPipeline
 from .api import APIContainer, create_app
 from .application import (
     InMemoryResearchRecordRepository,
     KnowledgeReviewApplicationService,
     ResearchApplicationService,
+    ResearchHistoryStore,
 )
 from .canonical import (
     DocumentStatus,
@@ -64,8 +68,113 @@ class _DemoComposer:
         )
 
 
-def _canonical_data() -> InMemoryCanonicalRepository:
-    repository = InMemoryCanonicalRepository()
+class _DemoToolPlanner:
+    """Deterministic planner for the in-memory demo: search → history → answer.
+
+    Mirrors the scripted behavior of ``_DemoComposer`` but through the real
+    tool surface, so the workspace live trace works without an LLM gateway.
+    """
+
+    def __init__(self) -> None:
+        self._steps: list[str] = []
+
+    def decide(self, system_prompt: str, user_prompt: str) -> Any:
+        import re
+
+        from .agentic.planner import PlannerDecision, PlannerTurn
+
+        del system_prompt
+        date_match = re.search(
+            r"applicable_time\): (\d{4}-\d{2}-\d{2})", user_prompt
+        )
+        applicable_time = date_match.group(1) if date_match else None
+        evidence_ids = re.findall(r'"evidence_id":\s*"([^"]+)"', user_prompt)
+        provision_ids = re.findall(r'"provision_id":\s*"([^"]+)"', user_prompt)
+        step = len(self._steps) + 1
+        if not evidence_ids:
+            self._steps.append("search")
+            return PlannerTurn(
+                decision=PlannerDecision(
+                    "tool",
+                    tool="search_provisions",
+                    args={
+                        "query": "مهلت اعتراض تجدیدنظر",
+                        "applicable_time": applicable_time,
+                    },
+                ),
+                contract_error=None,
+                raw_text="{}",
+                input_tokens=10,
+                output_tokens=10,
+                provider_id="demo",
+                model="demo-planner",
+                model_profile_id="demo",
+                model_profile_version=1,
+                prompt_id="demo",
+                prompt_version=1,
+                agent_version="demo/1",
+                response_id=f"demo-{step}",
+            )
+        if step == 2 and provision_ids:
+            self._steps.append("history")
+            return PlannerTurn(
+                decision=PlannerDecision(
+                    "tool",
+                    tool="get_version_history",
+                    args={
+                        "provision_id": provision_ids[0],
+                        "applicable_time": applicable_time,
+                    },
+                ),
+                contract_error=None,
+                raw_text="{}",
+                input_tokens=10,
+                output_tokens=10,
+                provider_id="demo",
+                model="demo-planner",
+                model_profile_id="demo",
+                model_profile_version=1,
+                prompt_id="demo",
+                prompt_version=1,
+                agent_version="demo/1",
+                response_id=f"demo-{step}",
+            )
+        self._steps.append("answer")
+        claims = ()
+        if evidence_ids:
+            claims = (
+                {
+                    "claim_id": "claim-demo",
+                    "text": "مهلت اعتراض برای اشخاص مقیم ایران بیست روز است.",
+                    "evidence_ids": sorted(set(evidence_ids)),
+                    "importance": "critical",
+                },
+            )
+        return PlannerTurn(
+            decision=PlannerDecision(
+                "answer",
+                answer="بر پایه ماده ۳۳۶ قانون نمونه، مهلت اعتراض بیست روز است.",
+                claims=claims,
+            ),
+            contract_error=None,
+            raw_text="{}",
+            input_tokens=10,
+            output_tokens=10,
+            provider_id="demo",
+            model="demo-planner",
+            model_profile_id="demo",
+            model_profile_version=1,
+            prompt_id="demo",
+            prompt_version=1,
+            agent_version="demo/1",
+            response_id=f"demo-{step}",
+        )
+
+
+def _canonical_data(
+    repository: InMemoryCanonicalRepository | None = None,
+) -> InMemoryCanonicalRepository:
+    repository = repository or InMemoryCanonicalRepository()
     repository.add_source_document(
         SourceDocument(
             "source-demo",
@@ -150,6 +259,11 @@ def create_demo_app() -> FastAPI:
         authorization,
         metrics,
         id_factory=lambda: f"demo-{next(identifiers)}",
+        agentic=ToolResearchLoop(
+            LegalResearchTools(canonical, graph),
+            _DemoToolPlanner(),
+            EvidenceVerifier(canonical),
+        ),
     )
     memory = ProgressiveMemoryService(graph)
     memory.create_candidate(
@@ -179,6 +293,9 @@ def create_demo_app() -> FastAPI:
             "expert-demo": Principal(
                 "demo-expert", "org-a", frozenset({Role.LEGAL_EXPERT})
             ),
+            "evaluator-demo": Principal(
+                "demo-evaluator", "org-a", frozenset({Role.EVALUATOR})
+            ),
         }
     )
     return create_app(
@@ -189,6 +306,9 @@ def create_demo_app() -> FastAPI:
             verifier,
             authorization,
             metrics,
+            history=ResearchHistoryStore(
+                os.environ.get("LEGAL_AGENT_HISTORY_PATH")
+            ),
         )
     )
 

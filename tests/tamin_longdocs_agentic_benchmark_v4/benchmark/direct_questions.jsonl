@@ -1,0 +1,13 @@
+{"id": "Q001", "category": "direct", "difficulty": "easy", "question": "کارفرما پس از ابلاغ بدهی اگر معترض باشد، طبق دستورالعمل هیئت‌های تشخیص مطالبات تا چه زمانی فرصت اعتراض دارد؟", "tags": ["deadline", "appeal"]}
+{"id": "Q002", "category": "direct", "difficulty": "easy", "question": "اگر خود سازمان تأمین اجتماعی به رأی هیئت بدوی تشخیص مطالبات معترض باشد، مهلت اعتراض سازمان چند روز است؟", "tags": ["deadline", "appeal"]}
+{"id": "Q003", "category": "direct", "difficulty": "easy", "question": "«سابقه قطعی» و «سابقه غیرقطعی» در دستورالعمل سوابق پرداخت حق بیمه چه تفاوتی دارند؟", "tags": ["definition", "record-status"]}
+{"id": "Q004", "category": "direct", "difficulty": "easy", "question": "سابقه «فعال/کارا» و «غیرکارا» یعنی چه و آیا سابقه غیرکارا قابل استفاده مجدد برای تعهدات است؟", "tags": ["definition", "record-status"]}
+{"id": "Q005", "category": "direct", "difficulty": "easy", "question": "بیمه‌شده متأهلی که ۱۴۰ ماه سابقه پرداخت حق بیمه دارد، حداکثر چند ماه می‌تواند مقرری بیمه بیکاری دریافت کند؟", "tags": ["calculation", "unemployment"]}
+{"id": "Q006", "category": "direct", "difficulty": "easy", "question": "بیمه‌شده چه مهلتی برای اعلام بیکاری به اداره کار دارد و اگر دیرتر مراجعه کند چه حالتی پیش‌بینی شده است؟", "tags": ["deadline", "unemployment"]}
+{"id": "Q007", "category": "direct", "difficulty": "easy", "question": "سهم همسر دائم بیمه‌شده متوفی از مستمری استحقاقی در بخشنامه بازماندگان چقدر است؟", "tags": ["survivor", "share"]}
+{"id": "Q008", "category": "direct", "difficulty": "easy", "question": "آیا مدت دریافت مقرری بیمه بیکاری جزو سابقه پرداخت حق بیمه برای بازنشستگی، ازکارافتادگی و فوت محسوب می‌شود؟", "tags": ["unemployment", "record"]}
+{"id": "Q009", "category": "direct", "difficulty": "easy", "question": "برای اینکه شخص در این بخشنامه «راننده حمل‌ونقل عمومی بار و مسافر بین‌شهری» محسوب شود، مهم‌ترین عناصر تعریف چیست؟", "tags": ["definition", "driver"]}
+{"id": "Q010", "category": "direct", "difficulty": "easy", "question": "چرا واگذارنده کار در قرارداد مقاطعه‌کاری ۵ درصد از هر پرداخت و آخرین قسط را نگه می‌دارد؟", "tags": ["contract", "article38", "clearance"]}
+{"id": "Q011", "category": "direct", "difficulty": "easy", "question": "پس از ابلاغ اجراییه، بدهکار در مهلت اولیه چه گزینه‌هایی برای جلوگیری از ادامه عملیات اجرایی دارد؟", "tags": ["enforcement", "deadline"]}
+{"id": "Q012", "category": "direct", "difficulty": "easy", "question": "در بخشنامه ازکارافتادگی، مرزهای درصد کاهش قدرت کار برای ازکارافتادگی کلی، جزئی ناشی از کار و غرامت مقطوع نقص عضو چیست؟", "tags": ["disability", "threshold"]}
+{"id": "Q013", "category": "direct", "difficulty": "easy", "question": "آیا کارمند زن سازمان با ۲۵ سال سابقه خدمت می‌تواند بدون شرط سنی درخواست بازنشستگی کند؟", "tags": ["retirement", "employee"]}

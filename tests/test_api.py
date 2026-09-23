@@ -1,3 +1,4 @@
+import json
 import unittest
 from datetime import date
 from itertools import count
@@ -215,6 +216,49 @@ class APITests(unittest.TestCase):
         self.assertEqual(response.headers["X-Request-ID"], "request-123")
         self.assertEqual(response.json()["status"], "ok")
 
+    def test_research_stream_emits_sse_and_final_result(self) -> None:
+        with self.client.stream(
+            "POST",
+            "/v1/research/stream",
+            json={**self.research_payload(), "strategy": "navigation"},
+            headers=self.headers("researcher-token"),
+        ) as response:
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("text/event-stream", response.headers["content-type"])
+            names = []
+            frames = []
+            for line in response.iter_lines():
+                if line.startswith("event: "):
+                    names.append(line[len("event: "):])
+                elif line.startswith("data: ") and names and names[-1] == "result":
+                    frames.append(json.loads(line[len("data: "):]))
+        self.assertEqual(names[0], "started")
+        self.assertIn("result", names)
+        self.assertEqual(names[-1], "done")
+        self.assertTrue(frames[0]["data"]["completed"])
+
+    def test_search_parse_returns_deterministic_filters(self) -> None:
+        response = self.client.post(
+            "/v1/organizations/org-a/search/parse",
+            json={"question": "مهلت پرداخت طبق ماده ۵ در تاریخ ۱۴۰۳/۰۲/۱۰ چیست؟"},
+            headers=self.headers("researcher-token"),
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        filters = response.json()["filters"]
+        self.assertEqual(filters["provision_type"], "article")
+        self.assertEqual(filters["provision_number"], "5")
+        self.assertIsNotNone(filters["applicable_time"])
+        self.assertIn("مهلت", filters["keywords"])
+
+    def test_unknown_strategy_is_rejected_as_domain_error(self) -> None:
+        response = self.client.post(
+            "/v1/research",
+            json={**self.research_payload(), "strategy": "agentic"},
+            headers=self.headers("researcher-token"),
+        )
+        self.assertEqual(response.status_code, 422)
+
     def test_workspace_and_assets_are_served_with_security_headers(self) -> None:
         root = self.client.get("/", follow_redirects=False)
         workspace = self.client.get("/workspace")
@@ -254,6 +298,55 @@ class APITests(unittest.TestCase):
         )
         self.assertEqual(read.status_code, 200)
         self.assertEqual(read.json()["answer"]["answer_id"], "answer-1")
+
+    def test_research_history_lists_and_reopens_episodes(self) -> None:
+        first = self.client.post(
+            "/v1/research",
+            json=self.research_payload(),
+            headers=self.headers("researcher-token"),
+        )
+        episode_id = first.json()["episode_id"]
+
+        history = self.client.get(
+            "/v1/organizations/org-a/research",
+            headers=self.headers("researcher-token"),
+        )
+        self.assertEqual(history.status_code, 200, history.text)
+        self.assertEqual(history.json()["count"], 1)
+        self.assertEqual(history.json()["episodes"][0]["episode_id"], episode_id)
+        self.assertTrue(history.json()["episodes"][0]["has_answer"])
+
+        reopen = self.client.get(
+            f"/v1/organizations/org-a/research/{episode_id}",
+            headers=self.headers("researcher-token"),
+        )
+        self.assertEqual(reopen.status_code, 200)
+        self.assertEqual(reopen.json()["answer"]["answer_id"], "answer-1")
+
+        # History is tenant- and permission-scoped.
+        denied = self.client.get(
+            "/v1/organizations/org-b/research",
+            headers=self.headers("researcher-token"),
+        )
+        self.assertEqual(denied.status_code, 403)
+
+    def test_research_graph_returns_nodes_edges_and_events(self) -> None:
+        graph = self.client.get(
+            "/v1/organizations/org-a/research-graph",
+            headers=self.headers("researcher-token"),
+        )
+        self.assertEqual(graph.status_code, 200, graph.text)
+        payload = graph.json()
+        self.assertEqual(payload["organization_id"], "org-a")
+        self.assertGreaterEqual(payload["node_count"], 2)
+        edge = payload["edges"][0]
+        self.assertEqual(edge["source"], "issue-1")
+        self.assertEqual(edge["target"], "provision-5")
+        self.assertEqual(edge["status"], "candidate")
+        by_id = {node["id"]: node for node in payload["nodes"]}
+        self.assertIn("provision-5", by_id)
+        self.assertEqual(by_id["provision-5"]["label"], "Article 5 · instrument-1")
+        self.assertEqual(payload["events"][0]["action"], "candidate_created")
 
     def test_library_search_and_exact_source_span_document_view(self) -> None:
         response = self.client.get(
@@ -327,6 +420,68 @@ class APITests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["status"], "expert_approved")
         self.assertEqual(response.json()["approval"]["approved_by"], "expert-1")
+
+    def test_two_step_review_flow_with_confirmation_ticket(self) -> None:
+        request_ticket = self.client.post(
+            "/v1/organizations/org-a/relations/relation-1/review",
+            json={"action": "approve", "note": "تأیید با کنترل منبع"},
+            headers=self.headers("expert-token"),
+        )
+        self.assertEqual(request_ticket.status_code, 200, request_ticket.text)
+        ticket = request_ticket.json()
+        self.assertEqual(ticket["action"], "approve")
+        self.assertTrue(ticket["ticket_id"])
+
+        confirm = self.client.post(
+            "/v1/organizations/org-a/relations/relation-1/review/confirm",
+            json={
+                "ticket_id": ticket["ticket_id"],
+                "action": "approve",
+                "note": "تأیید با کنترل منبع",
+                "idempotency_key": "idem-0001",
+            },
+            headers=self.headers("expert-token"),
+        )
+        self.assertEqual(confirm.status_code, 200, confirm.text)
+        self.assertEqual(confirm.json()["status"], "expert_approved")
+
+        replay = self.client.post(
+            "/v1/organizations/org-a/relations/relation-1/review/confirm",
+            json={
+                "ticket_id": ticket["ticket_id"],
+                "action": "approve",
+                "note": "تأیید با کنترل منبع",
+                "idempotency_key": "idem-0001",
+            },
+            headers=self.headers("expert-token"),
+        )
+        self.assertEqual(replay.status_code, 200)
+        self.assertEqual(replay.json()["status"], "expert_approved")
+
+        # بدون کلید idempotency، تیکت مصرف‌شده دیگر قابل استفاده نیست.
+        exhausted = self.client.post(
+            "/v1/organizations/org-a/relations/relation-1/review/confirm",
+            json={
+                "ticket_id": ticket["ticket_id"],
+                "action": "approve",
+                "note": "تأیید با کنترل منبع",
+            },
+            headers=self.headers("expert-token"),
+        )
+        self.assertEqual(exhausted.status_code, 404)
+
+    def test_review_confirm_rejects_tampered_note(self) -> None:
+        ticket = self.client.post(
+            "/v1/organizations/org-a/relations/relation-1/review",
+            json={"action": "approve", "note": "متن اصلی"},
+            headers=self.headers("expert-token"),
+        ).json()
+        tampered = self.client.post(
+            "/v1/organizations/org-a/relations/relation-1/review/confirm",
+            json={"ticket_id": ticket["ticket_id"], "action": "approve", "note": "متن دستکاری‌شده"},
+            headers=self.headers("expert-token"),
+        )
+        self.assertEqual(tampered.status_code, 422)
 
     def test_expert_review_queue_is_tenant_scoped_and_role_protected(self) -> None:
         forbidden = self.client.get(

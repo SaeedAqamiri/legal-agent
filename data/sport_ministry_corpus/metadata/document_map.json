@@ -1,0 +1,691 @@
+{
+ "D01": {
+  "file": "D01.md",
+  "title": "قانون اهداف، وظایف و اختیارات وزارت ورزش و جوانان",
+  "category": "قانون جاری",
+  "date": "1399/06/16",
+  "pages": 7,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=2548158419293780800"
+ },
+ "D02": {
+  "file": "D02.md",
+  "title": "آیین‌نامه اجرایی قانون اهداف، وظایف و اختیارات وزارت ورزش و جوانان",
+  "category": "آیین‌نامه جاری",
+  "date": "1401/12/24",
+  "pages": 2,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=16423637706770635428"
+ },
+ "D03": {
+  "file": "D03.md",
+  "title": "قانون تبدیل سازمان‌های تربیت بدنی و ملی جوانان به وزارت ورزش و جوانان",
+  "category": "قانون انتقال",
+  "date": "1389/10/12",
+  "pages": 1,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=17290258803281690213"
+ },
+ "D04": {
+  "file": "D04.md",
+  "title": "اساسنامه کمیته ملی المپیک ایران",
+  "category": "المپیک تاریخی",
+  "date": "1358/12/15",
+  "pages": 1,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/99568"
+ },
+ "D05": {
+  "file": "D05.md",
+  "title": "قانون اصلاح لایحه قانونی اساسنامه کمیته ملی المپیک ایران",
+  "category": "المپیک تاریخی",
+  "date": "1360/04/03",
+  "pages": 7,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/90190"
+ },
+ "D06": {
+  "file": "D06.md",
+  "title": "اساسنامه کمیته ملی المپیک جمهوری اسلامی ایران",
+  "category": "المپیک جاری",
+  "date": "1400/09/02",
+  "pages": 15,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/1678954"
+ },
+ "D07": {
+  "file": "D07.md",
+  "title": "اساسنامه کمیته ملی پارالمپیک",
+  "category": "پارالمپیک",
+  "date": "1397/05/27",
+  "pages": 8,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/1070528"
+ },
+ "D08": {
+  "file": "D08.md",
+  "title": "قانون انتزاع کمیته ملی پارالمپیک از کمیته ملی المپیک جمهوری اسلامی ایران",
+  "category": "قانون پارالمپیک",
+  "date": "1395/06/10",
+  "pages": 1,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=8751840910837058242"
+ },
+ "D09": {
+  "file": "D09.md",
+  "title": "اساسنامه فدراسیون‌های ورزشی آماتوری جمهوری اسلامی ایران",
+  "category": "فدراسیون‌ها نسخه ۱۳۸۱",
+  "date": "1381/02/11",
+  "pages": 7,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/121941"
+ },
+ "D10": {
+  "file": "D10.md",
+  "title": "الحاق بند (۲۳) به ماده (۳) اساسنامه فدراسیون‌های ورزشی آماتوری",
+  "category": "فدراسیون‌ها الحاق",
+  "date": "1392/02/22",
+  "pages": 1,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/845251"
+ },
+ "D11": {
+  "file": "D11.md",
+  "title": "اساسنامه فدراسیون‌های ورزشی آماتوری جمهوری اسلامی ایران (بازنگری ۱۴۰۰)",
+  "category": "فدراسیون‌ها نسخه ۱۴۰۰",
+  "date": "1400/04/19",
+  "pages": 12,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/1667739"
+ },
+ "D12": {
+  "file": "D12.md",
+  "title": "رأی شماره ۲۷ـ۱۳۸۰/۲/۲ هیأت عمومی دیوان عدالت اداری: ابطال تبصره ماده ۲ آیین‌نامه مسابقات فوتبال",
+  "category": "فوتبال رأی دیوان",
+  "date": "1380/02/02",
+  "pages": 2,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/102270"
+ },
+ "D13": {
+  "file": "D13.md",
+  "title": "رأی شماره ۱۶۶۵ هیأت عمومی دیوان عدالت اداری: فدراسیون فوتبال و شمول دستگاه‌های دولتی",
+  "category": "فوتبال رأی دیوان",
+  "date": "1400/08/15",
+  "pages": 11,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/1678164"
+ },
+ "D14": {
+  "file": "D14.md",
+  "title": "رأی دیوان عدالت اداری: ابطال تصمیم شماره ۸۳۲۷/۲۳/۲۵۱ فدراسیون تکواندو",
+  "category": "تکواندو رأی دیوان",
+  "date": "1385/06/26",
+  "pages": 1,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/104052"
+ },
+ "D15": {
+  "file": "D15.md",
+  "title": "رأی شماره ۱۴۵۲۲۲۹ هیأت تخصصی دیوان عدالت اداری: دستورالعمل فدراسیون",
+  "category": "رأی دیوان ورزش",
+  "date": "1402/09/12",
+  "pages": 8,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/1791608"
+ },
+ "D16": {
+  "file": "D16.md",
+  "title": "رأی شماره ۱۰۵۷۷۹۲ هیأت تخصصی دیوان عدالت اداری: عبارت هیأت رئیسه در اساسنامه",
+  "category": "رأی دیوان ورزش",
+  "date": "1402/07/08",
+  "pages": 3,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/1783593"
+ },
+ "D17": {
+  "file": "D17.md",
+  "title": "رأی شماره ۱۳۹۴۱۸۹ هیأت تخصصی دیوان عدالت اداری: جزء ب و ج بند ۲ ماده ۲",
+  "category": "رأی دیوان ورزش",
+  "date": "1402/07/10",
+  "pages": 2,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/1783840"
+ },
+ "D18": {
+  "file": "D18.md",
+  "title": "رأی شماره‌های ۴۴۰ و ۴۳۹ هیأت عمومی دیوان عدالت اداری: ابطال دستورالعمل فدراسیون",
+  "category": "رأی دیوان ورزش",
+  "date": "1392/07/08",
+  "pages": 30,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/867226"
+ },
+ "D19": {
+  "file": "D19.md",
+  "title": "تصویب‌نامه ترخیص کالاهای اهدایی فدراسیون فوتبال جمهوری اسلامی ایران",
+  "category": "فوتبال تصویب‌نامه",
+  "date": "1380/09/14",
+  "pages": 1,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/121639"
+ },
+ "D20": {
+  "file": "D20.md",
+  "title": "بخشنامه شورای عالی معادن: معافیت فدراسیون کشتی از اخذ گواهی صلاحیت",
+  "category": "کشتی بخشنامه",
+  "date": "1405/05/27",
+  "pages": 1,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=7258243151774583520"
+ },
+ "D21": {
+  "file": "D21.md",
+  "title": "قانون عضویت دولت جمهوری اسلامی ایران در فدراسیون ورزش دانشگاه‌های آسیا",
+  "category": "فدراسیون دانشگاهی",
+  "date": "1390/07/17",
+  "pages": 4,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=17426611318034386851"
+ },
+ "D22": {
+  "file": "D22.md",
+  "title": "مصوبه تشکیل انجمن مجزا در فدراسیون‌های چندرشته‌ای",
+  "category": "فدراسیون‌ها تصویب‌نامه",
+  "date": "1399/03/07",
+  "pages": 1,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/1547344"
+ },
+ "D23": {
+  "file": "D23.md",
+  "title": "تصویب‌نامه حق استفاده فدراسیون‌های (هیئت‌های) ورزشی از اماکن ورزشی استان‌ها",
+  "category": "فدراسیون‌ها اماکن",
+  "date": "1403/03/09",
+  "pages": 1,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/1807998"
+ },
+ "D24": {
+  "file": "D24.md",
+  "title": "قانون ورزش اجباری در مدارس جدیده",
+  "category": "تاریخی",
+  "date": "1306/06/14",
+  "pages": 1,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=4291461066965602037"
+ },
+ "D25": {
+  "file": "D25.md",
+  "title": "لایحه قانونی واگذاری سازمان ورزشی و فرهنگی تاج به سازمان تربیت بدنی ایران",
+  "category": "تاریخی",
+  "date": "1358/07/08",
+  "pages": 1,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=9184540084965638514"
+ },
+ "D26": {
+  "file": "D26.md",
+  "title": "لایحه قانونی راجع به مردمی کردن باشگاه‌های ورزشی عمومی در سراسر کشور",
+  "category": "تاریخی",
+  "date": "1358/09/27",
+  "pages": 1,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=9750869455865471248"
+ },
+ "D27": {
+  "file": "D27.md",
+  "title": "لایحه قانونی اداره و انجام امور استخدامی و پرسنلی و بهره‌برداری از کانون‌های ورزشی",
+  "category": "تاریخی",
+  "date": "1358/12/22",
+  "pages": 1,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=15363726103905209104"
+ },
+ "D28": {
+  "file": "D28.md",
+  "title": "لایحه قانونی معافیت وسایل و لوازم ورزشی سفارشی موردنیاز فدراسیون‌ها و باشگاه‌ها",
+  "category": "تاریخی",
+  "date": "1358/07/26",
+  "pages": 1,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=2025313692737018355"
+ },
+ "D29": {
+  "file": "D29.md",
+  "title": "اساسنامه سازمان مراکز جهانگردی برای ورزش‌های زمستانی",
+  "category": "تاریخی",
+  "date": "1356/02/29",
+  "pages": 4,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=11703171788411680104"
+ },
+ "D30": {
+  "file": "D30.md",
+  "title": "اصلاح ماده ۹ اساسنامه سازمان مراکز جهانگردی برای ورزش‌های زمستانی",
+  "category": "تاریخی",
+  "date": "1357/03/30",
+  "pages": 1,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=9328100976740491559"
+ },
+ "D31": {
+  "file": "D31.md",
+  "title": "قانون اجازه تأسیس باشگاه ورزشی و ورزشگاه توسط مردم با نظارت دولت",
+  "category": "تاریخی باشگاه‌ها",
+  "date": "1369/10/18",
+  "pages": 1,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=9562262196903032490"
+ },
+ "D32": {
+  "file": "D32.md",
+  "title": "الحاق تبصره (۳) به ذیل ماده (۵) آیین‌نامه اجرایی قانون اجازه تأسیس باشگاه ورزشی و ورزشگاه",
+  "category": "تاریخی باشگاه‌ها",
+  "date": "1381/04/19",
+  "pages": 1,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=3742632897642277482"
+ },
+ "D33": {
+  "file": "D33.md",
+  "title": "قانون اصلاح ماده (۱۱) قانون تأسیس سازمان تربیت بدنی",
+  "category": "تاریخی",
+  "date": "1380/01/28",
+  "pages": 1,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=1239755077207852887"
+ },
+ "D34": {
+  "file": "D34.md",
+  "title": "قانون اصلاح قانون سرباز قهرمان",
+  "category": "سرباز قهرمان",
+  "date": "1391/10/03",
+  "pages": 1,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=4840544963707557208"
+ },
+ "D35": {
+  "file": "D35.md",
+  "title": "آیین‌نامه اجرایی قانون اصلاح قانون سرباز قهرمان مصوب ۱۳۹۱/۱۰/۰۳",
+  "category": "سرباز قهرمان",
+  "date": "1392/10/16",
+  "pages": 3,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=10982686171358582556"
+ },
+ "D36": {
+  "file": "D36.md",
+  "title": "آیین‌نامه اجرایی جذب و استخدام قهرمانان مشمول قانون سرباز قهرمان",
+  "category": "سرباز قهرمان",
+  "date": "1395/04/20",
+  "pages": 2,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=11627360265410472511"
+ },
+ "D37": {
+  "file": "D37.md",
+  "title": "قانون الحاق جمهوری اسلامی ایران به کنوانسیون بین‌المللی علیه آپارتاید در ورزش",
+  "category": "بین‌الملل تاریخی",
+  "date": "1366/07/07",
+  "pages": 8,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=5886717331139469019"
+ },
+ "D38": {
+  "file": "D38.md",
+  "title": "مصوبه شورای عالی انقلاب فرهنگی: سیاست‌های فرهنگی ـ اجتماعی ورزش زنان کشور",
+  "category": "ورزش زنان",
+  "date": "1376/07/22",
+  "pages": 1,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=9125642287389027945"
+ },
+ "D39": {
+  "file": "D39.md",
+  "title": "اصلاح و تکمیل سیاست‌های فرهنگی ـ اجتماعی ورزش زنان کشور",
+  "category": "ورزش زنان",
+  "date": "1376/09/04",
+  "pages": 1,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=63030556329346539"
+ },
+ "D40": {
+  "file": "D40.md",
+  "title": "مصوبه اولویت‌ها و اقدامات اساسی حوزه فرهنگی ورزش کشور (نظام‌نامه فرهنگی ورزش کشور)",
+  "category": "سیاست‌های ورزش",
+  "date": "1395/03/25",
+  "pages": 2,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=7118364368265559908"
+ },
+ "D41": {
+  "file": "D41.md",
+  "title": "قانون تأمین اعتبار احداث، تکمیل، توسعه و تجهیز اماکن ورزشی",
+  "category": "اماکن ورزشی",
+  "date": "1376/12/27",
+  "pages": 1,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=9570685504552361769"
+ },
+ "D42": {
+  "file": "D42.md",
+  "title": "اصلاحیه آیین‌نامه اجرایی قانون تأمین اعتبار احداث، تکمیل، توسعه و تجهیز اماکن ورزشی",
+  "category": "اماکن ورزشی",
+  "date": "1380/03/23",
+  "pages": 1,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=17419052972947847573"
+ },
+ "D43": {
+  "file": "D43.md",
+  "title": "مصوبه شورای عالی اداری: نگهداری و بهره‌برداری از اماکن ورزشی متعلق به دولت",
+  "category": "اماکن ورزشی",
+  "date": "1398/11/12",
+  "pages": 2,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/1517611"
+ },
+ "D44": {
+  "file": "D44.md",
+  "title": "آیین‌نامه وظایف، مسئولیت‌ها و نحوه همکاری دستگاه‌های اجرایی در زمینه رشد و شکوفایی ورزش قهرمانی کشور",
+  "category": "آیین‌نامه تاریخی",
+  "date": "1376/05/08",
+  "pages": 3,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/117293"
+ },
+ "D45": {
+  "file": "D45.md",
+  "title": "آیین‌نامه توسعه فضاهای ورزشی در مناطق روستایی",
+  "category": "آیین‌نامه تاریخی",
+  "date": "1387/03/29",
+  "pages": 4,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=1362889610488514370"
+ },
+ "D46": {
+  "file": "D46.md",
+  "title": "اصلاح ماده (۶) آیین‌نامه چگونگی توسعه و تعمیم ورزش کارمندان دولت",
+  "category": "آیین‌نامه تاریخی",
+  "date": "1386/04/03",
+  "pages": 1,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=12161619933739419160"
+ },
+ "D47": {
+  "file": "D47.md",
+  "title": "تصویب‌نامه الزام وزارت ورزش و جوانان به عنوان دستگاه اصلی تعیین اهداف کلان",
+  "category": "تصویب‌نامه",
+  "date": "1397/06/21",
+  "pages": 1,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/1076952"
+ },
+ "D48": {
+  "file": "D48.md",
+  "title": "مصوبه اصلاح و تکمیل آیین‌نامه کمیسیون فرهنگی تربیت بدنی و ورزش کشور",
+  "category": "آیین‌نامه",
+  "date": "1400/06/20",
+  "pages": 2,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/1675328"
+ },
+ "D49": {
+  "file": "D49.md",
+  "title": "تعیین بسته اجرایی وزارت ورزش و جوانان موضوع ماده (۲۱۷) قانون برنامه پنجم توسعه",
+  "category": "تصویب‌نامه",
+  "date": "1391/11/29",
+  "pages": 7,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=12586618813603451702"
+ },
+ "D50": {
+  "file": "D50.md",
+  "title": "آیین‌نامه اجرایی بند (ت) ماده (۷۸) قانون برنامه هفتم پیشرفت",
+  "category": "آیین‌نامه برنامه هفتم",
+  "date": "1404/01/17",
+  "pages": 2,
+  "source": "rc",
+  "source_uri": "https://rc.majlis.ir/fa/law/print_version/1835426"
+ },
+ "D51": {
+  "file": "D51.md",
+  "title": "قانون فهرست قوانین و احکام نامعتبر در حوزه ورزش",
+  "category": "تنقیح منسوخ‌ها",
+  "date": "1400/11/17",
+  "pages": 6,
+  "source": "qavanin",
+  "source_uri": "https://qavanin.ir/Law/TreeText/?IDS=11316015784636744549"
+ },
+ "D52": {
+  "file": "D52.md",
+  "title": "بند (3) اصل سوم قانون اساسی جمهوری اسلامی ایران",
+  "category": "قانون اساسی",
+  "date": "1358/11/24",
+  "pages": 1,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-01",
+  "quality": "verbatim"
+ },
+ "D53": {
+  "file": "D53.md",
+  "title": "قانون تبديل سازمانهاي تربيت بدني و ملي جوانان به وزارت ورزش و جوانان",
+  "category": "قانون انتقال",
+  "date": "1389/10/12",
+  "pages": 1,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-02",
+  "quality": "verbatim"
+ },
+ "D54": {
+  "file": "D54.md",
+  "title": "قانون اهداف، وظايف و اختيارات وزارت ورزش و جوانان",
+  "category": "قانون جاری",
+  "date": "1399/06/16",
+  "pages": 7,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-03",
+  "quality": "verbatim"
+ },
+ "D55": {
+  "file": "D55.md",
+  "title": "قانون فهرست نهادها و موسسات عمومی غیردولتی",
+  "category": "قانون مرتبط",
+  "date": "1373/04/19",
+  "pages": 2,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-04",
+  "quality": "verbatim"
+ },
+ "D56": {
+  "file": "D56.md",
+  "title": "قانون اجازه تأسیس باشگاه ورزشی و ورزشگاه توسط مردم با نظارت دولت",
+  "category": "تاریخی باشگاه‌ها",
+  "date": "1369/10/26",
+  "pages": 1,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-05",
+  "quality": "verbatim"
+ },
+ "D57": {
+  "file": "D57.md",
+  "title": "ماده (5) قانون الحاق برخی مواد به قانون تنظیم بخشی از مقررات مالی دولت (2)",
+  "category": "آیین‌نامه اماکن",
+  "date": "1393/12/13",
+  "pages": 2,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-06",
+  "quality": "verbatim"
+ },
+ "D58": {
+  "file": "D58.md",
+  "title": "ماده (78) قانون برنامه هفتم پیشرفت",
+  "category": "آیین‌نامه برنامه هفتم",
+  "date": "1404",
+  "pages": 2,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-07",
+  "quality": "verbatim"
+ },
+ "D59": {
+  "file": "D59.md",
+  "title": "ماده (27) قانون الحاق برخی مواد به قانون تنظیم بخشی از مقررات مالی دولت (2)",
+  "category": "دستورالعمل واگذاری",
+  "date": null,
+  "pages": 10,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-08",
+  "quality": "verbatim"
+ },
+ "D60": {
+  "file": "D60.md",
+  "title": "ماده (69) قانون تنظیم بخشی از مقررات مالی دولت",
+  "category": "اماکن ورزشی",
+  "date": null,
+  "pages": 3,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-09",
+  "quality": "verbatim"
+ },
+ "D61": {
+  "file": "D61.md",
+  "title": "ماده (88) قانون تنظیم بخشی از مقررات مالی دولت",
+  "category": "قانون اصلاحی",
+  "date": "1384/08/11",
+  "pages": 1,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-10",
+  "quality": "verbatim"
+ },
+ "D62": {
+  "file": "D62.md",
+  "title": "قانون سرباز قهرمان",
+  "category": "سرباز قهرمان",
+  "date": "1376/12/24",
+  "pages": 2,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-11",
+  "quality": "verbatim"
+ },
+ "D63": {
+  "file": "D63.md",
+  "title": "قانون اصلاح قانون سرباز قهرمان",
+  "category": "سرباز قهرمان",
+  "date": "1391/10/12",
+  "pages": 1,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-12",
+  "quality": "verbatim"
+ },
+ "D64": {
+  "file": "D64.md",
+  "title": "آیین نامه اجرایی قانون اهداف، وظایف و اختیارات وزارت ورزش و جوانان",
+  "category": "آیین‌نامه جاری",
+  "date": "1402/01/16",
+  "pages": 2,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-13",
+  "quality": "verbatim"
+ },
+ "D65": {
+  "file": "D65.md",
+  "title": "آيين نامه اجرايي بند (ت) ماده (78) قانون برنامه پنج ساله هفتم پيشرفت",
+  "category": "آیین‌نامه برنامه هفتم",
+  "date": "1404",
+  "pages": 2,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-14",
+  "quality": "verbatim"
+ },
+ "D66": {
+  "file": "D66.md",
+  "title": "آیین‌نامه نحوه فعالیت هیئت‌های ورزشی استان و شهرستانی",
+  "category": "فدراسیون‌ها هیئت‌ها",
+  "date": "1400/04/19",
+  "pages": 3,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-15",
+  "quality": "verbatim"
+ },
+ "D67": {
+  "file": "D67.md",
+  "title": "آیین نامه اجرایی قانون اجازه تأسیس باشگاه ورزشی و ورزشگاه توسط مردم با نظارت دولت",
+  "category": "باشگاه‌ها",
+  "date": "1397/03/13",
+  "pages": 1,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-16",
+  "quality": "verbatim"
+ },
+ "D68": {
+  "file": "D68.md",
+  "title": "آيين نامه اجرايي ماده (5) قانون الحاق برخي مواد به قانون تنظيم بخشي از مقررات مالي دولت (2)",
+  "category": "آیین‌نامه اماکن",
+  "date": "1393/12/13",
+  "pages": 2,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-17",
+  "quality": "verbatim"
+ },
+ "D69": {
+  "file": "D69.md",
+  "title": "اساسنامه فدراسيون هاي ورزشي آماتوري جمهوري اسلامي ايران",
+  "category": "فدراسیون‌ها نسخه ۱۴۰۰",
+  "date": "1400/04/19",
+  "pages": 13,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-18",
+  "quality": "verbatim"
+ },
+ "D70": {
+  "file": "D70.md",
+  "title": "دستورالعمل شرایط اختصاصی نامزدهای دارای وثاقت، امانت، نحوه¬¬ی ثبت نام و رأی¬گیری برای داوطلبان پست¬های هیأت رییسه فدراسیون¬های تنیس",
+  "category": "فدراسیون تنیس",
+  "date": "1400",
+  "pages": 2,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-19",
+  "quality": "verbatim"
+ },
+ "D71": {
+  "file": "D71.md",
+  "title": "انتقال مجموعه ورزشي شهيد كشوري به شركت توسعه و نگهداري اماكن ورزشي كشور",
+  "category": "اماکن ورزشی",
+  "date": "1383/02/16",
+  "pages": 1,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-20",
+  "quality": "verbatim"
+ },
+ "D72": {
+  "file": "D72.md",
+  "title": "اساسنامه صندوق حمايت از قهرمانان و پيشكسوتان ورزش كشور",
+  "category": "نهاد ورزشی",
+  "date": "1403",
+  "pages": 5,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-21",
+  "quality": "verbatim"
+ },
+ "D73": {
+  "file": "D73.md",
+  "title": "دستورالعمل اجرایی تأمین و تجهیز امکانات مورد نیاز رشته¬های ورزش تیراندازی",
+  "category": "ورزش تیراندازی",
+  "date": null,
+  "pages": 1,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-22",
+  "quality": "summary: خلاصه توصیفی است نه متن رسمی دستورالعمل"
+ },
+ "D74": {
+  "file": "D74.md",
+  "title": "تصويب نامه در خصوص الحاق سازمان ميراث فرهنگي، صنايع دستي و گردشگري به تركيب اعضاي ستاد ملي ساماندهي امور جوانان",
+  "category": "امور جوانان",
+  "date": "1386/10/26",
+  "pages": 1,
+  "source": "user_xlsx",
+  "source_uri": "user_provided/iran-legal-sport.md#law-23",
+  "quality": "verbatim"
+ }
+}

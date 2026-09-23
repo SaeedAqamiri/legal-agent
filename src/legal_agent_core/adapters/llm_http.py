@@ -182,6 +182,7 @@ class OpenAICompatibleGateway:
                         "strict": request.structured_output.strict,
                     }
                 }
+            payload.update(profile.extra_body)
             return payload
 
         payload = {
@@ -203,6 +204,7 @@ class OpenAICompatibleGateway:
                     "strict": request.structured_output.strict,
                 },
             }
+        payload.update(profile.extra_body)
         return payload
 
     @classmethod

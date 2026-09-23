@@ -6,3 +6,11 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+out
+.env
+.ruff_cache/
+*.rdb
+
+# Notebook memory files written by the notes plugin
+.note.yaml
+**/.note.yaml

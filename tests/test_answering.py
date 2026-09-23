@@ -18,6 +18,7 @@ from legal_agent_core.verification import (
     EvidenceLedger,
     EvidenceVerifier,
     GenerationMetadata,
+    VerificationCode,
 )
 from tests.test_verification import (
     APPLICABLE_TIME,
@@ -172,15 +173,21 @@ class CitationPipelineTests(unittest.TestCase):
                 date(2024, 1, 1),
             )
 
-    def test_rejects_claim_without_verified_evidence_even_if_only_warning(self) -> None:
+    def test_rejects_claim_without_evidence_regardless_of_importance(self) -> None:
+        # The verifier and the publish gate must agree: an unevidenced claim is
+        # an error even when marked MINOR, otherwise publication would crash.
         draft = generated_draft(
             AnswerClaim("claim-sourced", "حکم مستند", ("ev-current",), ClaimImportance.CRITICAL),
             AnswerClaim("claim-minor", "جزئیات بدون منبع", (), ClaimImportance.MINOR),
         )
         report = EvidenceVerifier(self.repository).verify(draft, self.ledger, APPLICABLE_TIME)
-        self.assertTrue(report.accepted)
+        self.assertFalse(report.accepted)
+        self.assertIn(
+            VerificationCode.MISSING_EVIDENCE,
+            {issue.code for issue in report.issues},
+        )
 
-        with self.assertRaisesRegex(AnswerPublicationError, "claim-minor"):
+        with self.assertRaisesRegex(AnswerPublicationError, "verification"):
             CitationPipeline(self.repository).publish(draft, report, self.ledger, APPLICABLE_TIME)
 
     def test_navigation_to_verified_publication_end_to_end(self) -> None:

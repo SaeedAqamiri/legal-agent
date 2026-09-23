@@ -115,6 +115,9 @@ class ModelProfile:
     temperature: float | None = None
     reasoning_effort: ReasoningEffort | None = None
     store: bool = False
+    #: Provider-specific body fields merged verbatim into the request payload
+    #: (e.g. {"thinking": {"type": "disabled"}} for z.ai/GLM reasoning models).
+    extra_body: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         for field_name in ("profile_id", "provider_id", "model", "prompt_id"):
@@ -125,6 +128,8 @@ class ModelProfile:
             raise DomainError("max_output_tokens must be positive")
         if self.temperature is not None and not 0 <= self.temperature <= 2:
             raise DomainError("temperature must be between 0 and 2")
+        if not all(isinstance(key, str) for key in self.extra_body):
+            raise DomainError("extra_body keys must be strings")
 
 
 @dataclass(frozen=True, slots=True)

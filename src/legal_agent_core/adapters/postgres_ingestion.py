@@ -95,7 +95,7 @@ class PostgresIngestionRepository:
 
     def claim_next(self, worker_id: str, now: datetime, stale_before: datetime) -> IngestionJob | None:
         row = self._fetchone(
-            f"""
+            """
             WITH candidate AS (
                 SELECT job_id
                 FROM ingestion.jobs
@@ -113,7 +113,7 @@ class PostgresIngestionRepository:
                 locked_at = %s, locked_by = %s, updated_at = %s
             FROM candidate
             WHERE jobs.job_id = candidate.job_id
-            RETURNING {_JOB_COLUMNS}
+            RETURNING jobs.*
             """,
             (now, stale_before, now, worker_id, now),
         )

@@ -13,6 +13,16 @@ from ..canonical import (
 )
 from ..errors import DomainError
 
+__all__ = [
+    "DocumentVersionInput",
+    "IngestionResult",
+    "InstrumentInput",
+    "PageSegment",
+    "ParsedDocument",
+    "ProvisionInput",
+    "SourceInput",
+]
+
 
 @dataclass(frozen=True, slots=True)
 class SourceInput:
@@ -56,6 +66,28 @@ class DocumentVersionInput:
 
 
 @dataclass(frozen=True, slots=True)
+class PageSegment:
+    """A page-sized slice of one provision's text.
+
+    ``char_start``/``char_end`` are offsets into the provision's ``raw_text``
+    so the segment is always an exact substring of it.
+    """
+
+    page_number: int
+    text: str
+    char_start: int
+    char_end: int
+
+    def __post_init__(self) -> None:
+        if self.page_number < 1:
+            raise DomainError("page segment page_number must be one-based")
+        if not self.text.strip():
+            raise DomainError("page segment text must not be blank")
+        if not 0 <= self.char_start <= self.char_end:
+            raise DomainError("page segment char range must be valid")
+
+
+@dataclass(frozen=True, slots=True)
 class ProvisionInput:
     provision_type: ProvisionType
     label: str
@@ -74,6 +106,10 @@ class ProvisionInput:
     status: DocumentStatus | None = None
     created_from: str = "parser:v1"
     children: tuple[ProvisionInput, ...] = ()
+    #: Optional page-sized slices of ``raw_text``; when present the pipeline
+    #: creates one SourceSpan per segment so citations can point at the exact
+    #: page a passage lives on. Empty means a single span (legacy behaviour).
+    page_segments: tuple[PageSegment, ...] = ()
 
     def __post_init__(self) -> None:
         if self.page_number < 1:

@@ -17,10 +17,15 @@ falkordb = ["FalkorDB>=1.6,<2"]
 falkordb-lite = ["falkordblite>=0.10; platform_system != 'Windows' and python_version >= '3.12'"]
 postgres = ["psycopg[binary]>=3.2,<4"]
 api = ["fastapi>=0.115,<1", "uvicorn>=0.32,<1"]
+oidc = ["PyJWT>=2.8,<3", "cryptography>=42"]
 dev = ["ruff>=0.16,<1", "httpx2>=2,<3"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-legal_agent_core = ["db/migrations/*.sql", "ui/*"]
+legal_agent_core = ["db/migrations/*.sql", "ui/*", "agentic/skills/*.md"]
+
+[tool.ruff.lint.per-file-ignores]
+# the runner mutates sys.path before importing the package under src/
+"scripts/run_benchmark.py" = ["E402", "I001"]

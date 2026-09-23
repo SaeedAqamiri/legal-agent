@@ -27,10 +27,20 @@
             کتابخانه اسناد
             <span class="nav-count" id="library-count">—</span>
           </button>
+          <button class="nav-item" type="button" data-panel="history-panel">
+            <span class="nav-icon" aria-hidden="true">≣</span>
+            تاریخچه پژوهش
+            <span class="nav-count" id="history-count">۰</span>
+          </button>
           <button class="nav-item" type="button" data-panel="trace-panel">
             <span class="nav-icon" aria-hidden="true">⌘</span>
             مسیر استدلال
             <span class="nav-count" id="trace-count">۰</span>
+          </button>
+          <button class="nav-item" type="button" data-panel="graph-panel">
+            <span class="nav-icon" aria-hidden="true">⬡</span>
+            دانش تدریجی
+            <span class="nav-count" id="graph-count">—</span>
           </button>
           <button class="nav-item" type="button" data-panel="review-panel">
             <span class="nav-icon" aria-hidden="true">✓</span>
@@ -52,6 +62,7 @@
             <span class="state-dot" aria-hidden="true"></span>
             آماده اتصال
           </div>
+          <button class="primary-button session-connect" id="connect-button" type="button">ورود</button>
           <p>توکن فقط در حافظه همین صفحه نگهداری می‌شود.</p>
         </section>
 
@@ -95,10 +106,18 @@
                     </div>
                   </div>
                   <div class="form-footer">
+                    <label class="live-toggle" for="live-mode">
+                      <input id="live-mode" type="checkbox" checked>
+                      <span>پژوهش زنده (نمایش گام‌به‌گام ابزارها)</span>
+                    </label>
                     <div class="assurance"><span aria-hidden="true">◆</span> بررسی زمانی و استنادی خودکار</div>
                     <button class="primary-button" id="research-submit" type="submit">
                       <span>شروع پژوهش</span><b aria-hidden="true">←</b>
                     </button>
+                  </div>
+                  <div class="live-steps is-hidden" id="live-steps" aria-live="polite">
+                    <div class="section-label">پیشرفت زنده پژوهش</div>
+                    <ol id="live-steps-list"></ol>
                   </div>
                 </form>
               </div>
@@ -183,6 +202,15 @@
             </div>
           </section>
 
+          <section class="panel" id="history-panel" aria-labelledby="history-heading">
+            <div class="panel-heading">
+              <div><span class="overline">Case files</span><h2 id="history-heading">تاریخچه پژوهش این سازمان</h2><p>پرونده‌های پژوهشی ثبت‌شده را باز کنید یا همان گفتگو را ادامه دهید؛ تاریخچه در چند نشست حفظ می‌شود.</p></div>
+              <button class="secondary-button" id="refresh-history" type="button">به‌روزرسانی</button>
+            </div>
+            <div class="empty-state" id="history-empty"><span aria-hidden="true">≣</span><h3>هنوز پژوهشی ثبت نشده است</h3><p>پس از اجرای یک سؤال، پرونده آن در اینجا برای بازبینی و ادامه در دسترس خواهد بود.</p></div>
+            <div class="history-list is-hidden" id="history-list"></div>
+          </section>
+
           <section class="panel" id="trace-panel" aria-labelledby="trace-heading">
             <div class="panel-heading">
               <div><span class="overline">Audit trail</span><h2 id="trace-heading">مسیر پژوهش و استدلال</h2></div>
@@ -197,6 +225,22 @@
                 <section><h3>رویدادهای پژوهش</h3><ol class="timeline" id="action-timeline"></ol></section>
                 <section><h3>دفتر شواهد</h3><div class="evidence-list" id="evidence-list"></div></section>
               </div>
+            </div>
+          </section>
+
+          <section class="panel" id="graph-panel" aria-labelledby="graph-heading">
+            <div class="panel-heading">
+              <div><span class="overline">Progressive memory</span><h2 id="graph-heading">نقشه دانش تدریجی و سیر احداث</h2><p>رابطه‌های تأییدشده، کاندید و ردشده به همراه رویدادهای audit؛ گراف فقط با محتوای همین سازمان.</p></div>
+              <button class="secondary-button" id="refresh-graph" type="button">به‌روزرسانی گراف</button>
+            </div>
+            <div class="empty-state" id="graph-empty"><span aria-hidden="true">⬡</span><h3>گراف هنوز بارگذاری نشده است</h3><p>اتصال امن را تنظیم و گراف دانش سازمان را باز کنید.</p></div>
+            <div class="graph-layout is-hidden" id="graph-layout">
+              <div class="graph-legend" id="graph-legend"></div>
+              <div class="graph-canvas-wrap"><svg id="graph-svg" viewBox="0 0 900 560" role="img" aria-label="نقشه روابط دانش تدریجی"></svg></div>
+              <section class="graph-events">
+                <div class="section-label">رویدادهای audit و تغییر وضعیت</div>
+                <ol class="timeline" id="graph-event-timeline"></ol>
+              </section>
             </div>
           </section>
 

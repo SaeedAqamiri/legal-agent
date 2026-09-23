@@ -55,11 +55,28 @@ _CHARACTER_TRANSLATION = str.maketrans(
 )
 
 
+# Persian number words mapped to digits so spelled-out numbers in queries
+# («سی روز») match numerals in source text («۳۰ روز») and vice versa.
+# Deliberately excludes «نه» (ambiguity with negation).
+_WORD_NUMBERS: dict[str, str] = {
+    "یک": "1", "دو": "2", "سه": "3", "چهار": "4", "پنج": "5",
+    "شش": "6", "هفت": "7", "هشت": "8", "ده": "10",
+    "یازده": "11", "دوازده": "12", "سیزده": "13", "چهارده": "14",
+    "پانزده": "15", "شانزده": "16", "هفده": "17", "هجده": "18",
+    "نوزده": "19", "بیست": "20", "سی": "30", "چهل": "40",
+    "پنجاه": "50", "شصت": "60", "هفتاد": "70", "هشتاد": "80",
+    "نود": "90", "صد": "100", "هزار": "1000",
+}
+
+
 def normalize_search_text(value: str) -> str:
     """Normalize Persian/Arabic variants without changing canonical source text."""
-
     normalized = unicodedata.normalize("NFKC", value).translate(_CHARACTER_TRANSLATION).casefold()
-    return " ".join(_TOKEN_PATTERN.findall(normalized))
+    tokens = (
+        _WORD_NUMBERS.get(token, token)
+        for token in _TOKEN_PATTERN.findall(normalized)
+    )
+    return " ".join(tokens)
 
 
 def search_tokens(value: str) -> frozenset[str]:

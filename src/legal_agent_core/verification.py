@@ -181,15 +181,13 @@ class EvidenceVerifier:
         referenced_ids = {evidence_id for claim in draft.claims for evidence_id in claim.evidence_ids}
         for claim in draft.claims:
             if not claim.evidence_ids:
-                severity = (
-                    VerificationSeverity.WARNING
-                    if claim.importance == ClaimImportance.MINOR
-                    else VerificationSeverity.ERROR
-                )
+                # The publish gate forbids ANY unevidenced claim, so verification
+                # must be equally strict — a MINOR warning here would let the
+                # report pass and then crash CitationPipeline.publish.
                 issues.append(
                     VerificationIssue(
                         VerificationCode.MISSING_EVIDENCE,
-                        severity,
+                        VerificationSeverity.ERROR,
                         "claim has no source evidence",
                         claim_id=claim.claim_id,
                     )

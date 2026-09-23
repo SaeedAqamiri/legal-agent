@@ -19,6 +19,7 @@ from ..canonical import (
     SourceDocument,
     SourceSpan,
 )
+from ..errors import NotFoundError
 from ..repositories import CanonicalRepository
 from .models import IngestionResult, ParsedDocument, ProvisionInput
 from .normalization import normalize_legal_text, normalize_number
@@ -36,6 +37,7 @@ class _IngestedProvision:
     provision: Provision
     version: ProvisionVersion
     span: SourceSpan
+    spans: tuple[SourceSpan, ...] = ()
 
 
 class CanonicalIngestionPipeline:
@@ -94,7 +96,13 @@ class CanonicalIngestionPipeline:
         )
 
         self.repository.add_source_document(source_document)
-        self.repository.add_instrument(instrument)
+        # Reuse an already-known instrument identity instead of re-adding it:
+        # variant documents (same normalized canonical title) share one
+        # instrument and only add new document versions.
+        try:
+            self.repository.get_instrument(instrument_id)
+        except NotFoundError:
+            self.repository.add_instrument(instrument)
         self.repository.add_document_version(document_version)
 
         ingested: list[_IngestedProvision] = []
@@ -178,7 +186,11 @@ class CanonicalIngestionPipeline:
             document_version_id=document_version_id,
             provision_ids=tuple(item.provision.provision_id for item in ingested),
             provision_version_ids=tuple(item.version.provision_version_id for item in ingested),
-            source_span_ids=tuple(item.span.source_span_id for item in ingested),
+            source_span_ids=tuple(
+                item_span.source_span_id
+                for item in ingested
+                for item_span in (item.spans or (item.span,))
+            ),
             explicit_references=tuple(references),
             canonical_edges=tuple(edges),
         )
@@ -279,10 +291,40 @@ class CanonicalIngestionPipeline:
             char_end=provision_input.char_end,
             raw_text=raw_text,
         )
+        spans: tuple[SourceSpan, ...] = (span,)
+        if provision_input.page_segments:
+            # One span per page so citations can point at the exact page a
+            # passage lives on. Each segment is a substring of raw_text and
+            # carries its own deterministic id.
+            page_spans: list[SourceSpan] = []
+            for page_segment in provision_input.page_segments:
+                segment_id = stable_id(
+                    "span",
+                    provision_version_id,
+                    page_segment.page_number,
+                    page_segment.char_start,
+                    page_segment.char_end,
+                    page_segment.text,
+                )
+                page_spans.append(
+                    SourceSpan(
+                        source_span_id=segment_id,
+                        source_document_id=source_document_id,
+                        document_version_id=document_version_id,
+                        provision_version_id=provision_version_id,
+                        page_number=page_segment.page_number,
+                        char_start=page_segment.char_start,
+                        char_end=page_segment.char_end,
+                        raw_text=page_segment.text,
+                    )
+                )
+            spans = (page_spans[0], *page_spans)
+            span = page_spans[0]
         self.repository.add_provision(provision)
         self.repository.add_provision_version(version)
-        self.repository.add_source_span(span)
-        output.append(_IngestedProvision(provision_input, provision, version, span))
+        for item_span in spans:
+            self.repository.add_source_span(item_span)
+        output.append(_IngestedProvision(provision_input, provision, version, span, spans))
 
         for position, child in enumerate(provision_input.children):
             self._ingest_provision(

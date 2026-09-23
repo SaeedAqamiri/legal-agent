@@ -203,7 +203,13 @@ class FalkorResearchGraphRepository(ResearchGraphRepository):
             raise RuntimeError(
                 "install the FalkorDB extra: pip install 'legal-agent-core[falkordb]'"
             ) from exc
-        return cls(FalkorDB(**client_options), graph_prefix)
+        url = client_options.pop("url", None)
+        client = (
+            FalkorDB.from_url(url, **client_options)
+            if isinstance(url, str) and url
+            else FalkorDB(**client_options)
+        )
+        return cls(client, graph_prefix)
 
     def graph_name_for(self, organization_id: str) -> str:
         if not organization_id or not organization_id.strip():
@@ -454,6 +460,11 @@ class FalkorResearchGraphRepository(ResearchGraphRepository):
             if (label, (property_name,)) in existing:
                 continue
             statement = f"CREATE INDEX FOR (node:{label}) ON (node.{property_name})"
-            graph.query(statement)
+            try:
+                graph.query(statement)
+            except Exception as exc:
+                if "already indexed" in str(exc).lower():
+                    continue
+                raise
             created.append(statement)
         return tuple(created)
