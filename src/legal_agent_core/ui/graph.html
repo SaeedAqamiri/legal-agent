@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>گراف قوانین — عامل پژوهش حقوقی</title>
+<link rel="stylesheet" href="/ui/styles.css">
+<link rel="stylesheet" href="/ui/graph.css?v=3">
+</head>
+<body>
+<header>
+  <div class="brand">⚖️ عامل پژوهش حقوقی<small style="display:block;color:#8b98a5;font-weight:400;font-size:11px;">گراف دانش حقوقی</small></div>
+  <nav>
+    <a href="/workspace">میز کار</a>
+    <a href="/ui/graph.html" class="active">گراف</a>
+    <a href="/ui/laws.html">قوانین</a>
+  </nav>
+  <div class="chips">
+    <div class="chip" id="chip-nodes">گره: —</div>
+    <div class="chip" id="chip-edges">یال: —</div>
+    <div class="chip" id="chip-pending">در انتظار: —</div>
+  </div>
+</header>
+<div class="layout">
+  <div class="side">
+    <div class="block">
+      <input type="search" id="q" placeholder="فیلتر روی گراف… (مثلاً مدنی)">
+    </div>
+    <div class="block legend">
+      <span><b style="background:#d4af37"></b> اساسی</span>
+      <span><b style="background:#3f8ed6"></b> خاص</span>
+      <span><b style="background:#2f6ea5"></b> عادی</span>
+      <span><b style="background:#5b7d99"></b> مقررات</span>
+      <span><b style="background:#7f97ab"></b> بخشنامه</span>
+      <span><b style="background:#d09b2c; border-radius:2px; height:3px;"></b> در انتظار تأیید</span>
+    </div>
+    <div class="block stats" id="stats">در حال بارگذاری…</div>
+    <div class="panel-body" id="panel">
+      <div class="card muted">روی هر گره کلیک کن تا جزئیات، همسایه‌ها و رویدادهای در انتظار تأییدش را ببینی. با جستجو گراف فیلتر می‌شود.</div>
+    </div>
+  </div>
+  <div class="canvas-wrap">
+    <div id="graph"></div>
+    <div class="zoomer">
+      <button id="zoom-in">+</button>
+      <button id="zoom-out">−</button>
+      <button id="zoom-fit" title="اندازه‌گیری کامل">⤢</button>
+    </div>
+    <div id="status">…</div>
+  </div>
+</div>
+<script src="/ui/vendor/vis-network.min.js"></script>
+<script src="/ui/graph.js?v=3"></script>
+</body>
+</html>

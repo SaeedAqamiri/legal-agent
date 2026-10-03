@@ -1,0 +1,75 @@
+{
+  "version": "1.0",
+  "note": "Seed registry mirroring sources.sources (V0005). kind: portal|api|baray_form|upload|rss",
+  "sources": [
+    {
+      "source_id": "qavanin",
+      "name": "سامانه ملی جستجوی قوانین و مقررات (qavanin.ir)",
+      "kind": "portal",
+      "base_url": "https://qavanin.ir",
+      "enabled": true,
+      "connector_config": {
+        "text_endpoint": "/Law/TreeText/?IDS=",
+        "format": "html"
+      },
+      "notes": "مرجع اصلی متن قوانین؛ شماره ثبت (IDS) به‌عنوان external_id"
+    },
+    {
+      "source_id": "dotic",
+      "name": "پایگاه ملی اطلاع‌رسانی قوانین و مقررات کشور (dotic.ir)",
+      "kind": "portal",
+      "base_url": "https://dotic.ir",
+      "enabled": true,
+      "connector_config": {
+        "news_endpoint": "/News/View/",
+        "search_endpoint": "/new-search"
+      },
+      "notes": "مرکز تدوین، تنقیح و انتشار — مقررات، آراء، نظرات؛ شناسه خبر external_id"
+    },
+    {
+      "source_id": "rrk",
+      "name": "روزنامه رسمی کشور (rrk.ir)",
+      "kind": "rss",
+      "base_url": "https://rrk.ir",
+      "enabled": true,
+      "connector_config": {},
+      "notes": "مرجع تاریخ انتشار و فایل رسمی PDF قوانین"
+    },
+    {
+      "source_id": "rc_majlis",
+      "name": "آرشیو مرکز پژوهش‌های مجلس (rc.majlis.ir)",
+      "kind": "portal",
+      "base_url": "https://rc.majlis.ir",
+      "enabled": true,
+      "connector_config": {
+        "print_endpoint": "/fa/law/print_version/"
+      },
+      "notes": "پشتیبان متن قوانین قدیمی (قبل از ۱۳۸۰)"
+    },
+    {
+      "source_id": "baray_internal",
+      "name": "سامانه امور حقوقی داخلی (بارای 192.168.8.41:9000)",
+      "kind": "baray_form",
+      "base_url": "http://192.168.8.41:9000",
+      "enabled": false,
+      "connector_config": {
+        "auth": "/Authentication/login",
+        "tree": "/Ui/GetSystemList",
+        "discovery_script": "scripts/baray_explore.py",
+        "credentials_env": ["BARAY_USER", "BARAY_PASSWORD"]
+      },
+      "notes": "نیازمند شبکه داخلی؛ پس از discovery کامل فعال می‌شود"
+    },
+    {
+      "source_id": "user_upload",
+      "name": "فایل‌های ارائه‌شده توسط کاربر",
+      "kind": "upload",
+      "base_url": null,
+      "enabled": true,
+      "connector_config": {
+        "drop_dir": "data/qavanin_store/staging"
+      },
+      "notes": "مسیر اصلی فاز فعلی: کاربر فایل‌ها را می‌دهد، pipeline همان جریان S1..S7 را طی می‌کند"
+    }
+  ]
+}

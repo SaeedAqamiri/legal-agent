@@ -482,3 +482,30 @@ class PlannerParsingTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertIsNotNone(decision)
         self.assertEqual(decision.tool, "search_provisions")  # type: ignore[union-attr]
+
+
+class DeadEndGuardTests(unittest.TestCase):
+    def test_three_empty_searches_trigger_dead_end_hint(self) -> None:
+        repository = build_canonical()
+        # کوئری‌ای که هیچ واژه‌ای از آن در کورپوس نیست → EMPTY پیاپی
+        decision = PlannerDecision(
+            "tool",
+            tool="search_provisions",
+            args={
+                "query": "فهرست کشتی‌های بادبانی اقیانوس هند",
+                "applicable_time": APPLICABLE.isoformat(),
+            },
+        )
+        planner = ScriptedPlanner([decision], repeat_last=True)
+        outcome = _run(_loop(repository, planner, max_steps=5))
+        self.assertFalse(outcome.completed)
+        # از گام ۴ به بعد (بعد از ۳ خالی) هشدار بن‌بست باید دیده شود
+        fourth_prompt = planner.prompts[3][1]
+        self.assertIn("هشدار بن‌بست", fourth_prompt)
+        # در گام ۳ (فقط ۲ خالی) هنوز نباید باشد
+        third_prompt = planner.prompts[2][1]
+        self.assertNotIn("هشدار بن‌بست", third_prompt)
+
+
+if __name__ == "__main__":
+    unittest.main()

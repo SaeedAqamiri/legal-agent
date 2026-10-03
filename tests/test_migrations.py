@@ -41,7 +41,7 @@ class MigrationTests(unittest.TestCase):
     def test_loads_versioned_migration_with_stable_checksum(self) -> None:
         migrations = load_migrations()
 
-        self.assertEqual([item.version for item in migrations], [1, 2, 3, 4])
+        self.assertEqual([item.version for item in migrations], [1, 2, 3, 4, 5])
         self.assertEqual(migrations[0].name, "canonical_and_research_graph")
         self.assertEqual(len(migrations[0].checksum), 64)
 
@@ -73,7 +73,7 @@ class MigrationTests(unittest.TestCase):
 
         applied = apply_migrations(connection)
 
-        self.assertEqual(applied, (1, 2, 3, 4))
+        self.assertEqual(applied, (1, 2, 3, 4, 5))
         self.assertEqual(connection.commit_count, 1)
         self.assertEqual(connection.rollback_count, 0)
         insert_calls = [call for call in connection.fake_cursor.executed if "insert into" in call[0].lower()]
@@ -97,6 +97,40 @@ class MigrationTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, sql)
+
+    def test_sources_schema_stores_law_originals_idempotently(self) -> None:
+        migration = load_migrations()[4]
+        sql = migration.sql.lower()
+
+        self.assertEqual(migration.name, "qavanin_sources")
+        for fragment in (
+            "create schema if not exists sources",
+            "create table sources.instruments",
+            "create table sources.sources",
+            "create table sources.source_documents",
+            "create table sources.legal_effects",
+            "create table sources.fetch_runs",
+            "create table sources.extraction_jobs",
+            "original_checksum",
+            "text_extract_method",
+            "approval_date",
+            "notify_date",
+            "gazette_no",
+            "witness_quote",
+            "create unique index ix_source_documents_content",
+            "create unique index ix_legal_effects_idempotent",
+            "unique (document_uid, stage, input_checksum, prompt_version)",
+            "'candidate', 'approved', 'rejected'",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, sql)
+
+    def test_sources_schema_separates_dates_and_keeps_status_cached(self) -> None:
+        sql = load_migrations()[4].sql
+
+        self.assertIn("do NOT copy one into another", sql)
+        self.assertIn("Denormalized cache for ops lists", sql)
+        self.assertIn("A mere potential conflict is NOT a repeal", sql)
 
     def test_runner_is_idempotent_for_applied_migration(self) -> None:
         migration = load_migrations()[0]

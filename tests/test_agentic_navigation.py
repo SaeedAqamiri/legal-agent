@@ -67,13 +67,26 @@ class NavigationToolTests(unittest.TestCase):
         self.assertEqual(result.evidence[0].retrieval_method, "agentic_grep")
 
     def test_find_in_document_requires_all_tokens(self) -> None:
-        result = self._dispatch(
+        # AND-first: strict matches exist → they win. Zero strict matches →
+        # graded PARTIAL leads (best token overlap) instead of a dead end.
+        strict = self._dispatch(
             "find_in_document",
-            query="مهلت مذکور خارج زلزله",
+            query="مهلت مذکور خارج",
             applicable_time=self.at,
         )
-        self.assertEqual(result.envelope.status, ToolStatus.EMPTY)
-        self.assertIn("hint", result.envelope.meta)
+        self.assertEqual(strict.envelope.status, ToolStatus.OK)  # exact hits win
+        for item in strict.envelope.items:
+            self.assertIn("خارج", item["text"])
+
+        partial = self._dispatch(
+            "find_in_document",
+            query="مهلت زلزله سیلاب",
+            applicable_time=self.at,
+        )
+        self.assertEqual(partial.envelope.status, ToolStatus.PARTIAL)
+        self.assertFalse(partial.envelope.complete)
+        self.assertTrue(partial.envelope.meta.get("partial_match"))
+        self.assertTrue(partial.envelope.items)
 
     def test_find_in_document_page_range_filter(self) -> None:
         result = self._dispatch(
@@ -134,6 +147,34 @@ class NavigationToolTests(unittest.TestCase):
             "read_span", source_span_id="ghost", applicable_time=self.at
         )
         self.assertEqual(result.envelope.status, ToolStatus.NOT_FOUND)
+
+    def test_read_span_accepts_evidence_id(self) -> None:
+        # Regression: planners repeatedly passed evidence ids to read_span
+        # (5 benchmark cases); the session index must resolve them.
+        search = self._dispatch(
+            "search_provisions",
+            query="تبصره مقیم خارج",
+            applicable_time=self.at,
+        )
+        evidence_id = search.envelope.items[0]["evidence_id"]
+        expected_span = search.envelope.items[0]["source_span_id"]
+
+        result = self._dispatch(
+            "read_span",
+            source_span_id=evidence_id,
+            applicable_time=self.at,
+        )
+        self.assertEqual(result.envelope.status, ToolStatus.OK)
+        item = result.envelope.items[0]
+        self.assertEqual(item["source_span_id"], expected_span)
+        self.assertEqual(item["page"], search.envelope.items[0]["page"])
+
+    def test_read_span_unknown_evidence_id_gets_hint(self) -> None:
+        result = self._dispatch(
+            "read_span", source_span_id="ev-000000000000000000000000", applicable_time=self.at
+        )
+        self.assertEqual(result.envelope.status, ToolStatus.NOT_FOUND)
+        self.assertIn("evidence_id", "; ".join(result.envelope.errors))
 
     # ---------------------------------------------------- list_document_contents
 
@@ -248,3 +289,31 @@ class NavigationToolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DynamicCatalogTests(unittest.TestCase):
+    def test_unconfigured_tools_are_hidden(self) -> None:
+        bare = LegalResearchTools(build_canonical())
+        catalog = bare.tool_catalog()
+        self.assertIn("search_provisions", catalog)
+        self.assertNotIn("semantic_search", catalog)
+        self.assertNotIn("expand_search_terms", catalog)
+
+    def test_configured_tools_are_listed(self) -> None:
+        from legal_agent_core.agentic.semantic import SemanticSpanIndex
+
+        tools = LegalResearchTools(
+            build_canonical(),
+            term_expander=lambda query: [],
+            semantic_index=SemanticSpanIndex(build_canonical(), FakeEmbeddingClient()),
+        )
+        catalog = tools.tool_catalog()
+        self.assertIn("semantic_search", catalog)
+        self.assertIn("expand_search_terms", catalog)
+
+
+class FakeEmbeddingClient:
+    model = "fake"
+
+    def embed(self, texts):
+        return [[1.0, 0.0] for _ in texts]

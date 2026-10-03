@@ -684,3 +684,6 @@ byId("toggle-token").addEventListener("click", () => {
 });
 byId("applicable-time").value = new Date().toISOString().slice(0, 10);
 byId("library-date").value = byId("applicable-time").value;
+byId("applicable-time").value = new Date().toISOString().slice(0, 10);
+connectSession();
+loadLibrary();

@@ -1,0 +1,39 @@
+@font-face { font-family: Vazirmatn; src: url("/ui/vendor/fonts/Vazirmatn-Regular.ttf"); font-weight: 400; }
+@font-face { font-family: Vazirmatn; src: url("/ui/vendor/fonts/Vazirmatn-Medium.ttf"); font-weight: 500; }
+@font-face { font-family: Vazirmatn; src: url("/ui/vendor/fonts/Vazirmatn-Bold.ttf"); font-weight: 700; }
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: #0f1418; color: #e6edf3;
+  font-family: Vazirmatn, sans-serif;
+}
+.doc {
+  max-width: 880px; margin: 0 auto; padding: 48px 28px 90px;
+  font-size: 15.5px; line-height: 2.15; text-align: justify;
+}
+h1 {
+  font-size: 26px; line-height: 1.7; color: #fff; margin: 0 0 8px;
+  padding-bottom: 16px; border-bottom: 2px solid #2c3540;
+}
+.doc-title-chip {
+  display: inline-block; background: linear-gradient(135deg, #d4af37, #b98b1e);
+  color: #24303c; font-size: 12px; font-weight: 700; border-radius: 20px;
+  padding: 3px 14px; margin-bottom: 12px;
+}
+h2 { font-size: 20px; color: #4cc2ff; margin: 34px 0 10px; }
+h3 {
+  background: linear-gradient(90deg, #1a2530, #141b22);
+  color: #ffd97a; border-right: 4px solid #d4af37; border-radius: 8px;
+  padding: 10px 14px; font-size: 15px; margin: 26px 0 12px;
+}
+blockquote {
+  background: #141b22; border-right: 3px solid #4cc2ff; border-radius: 8px;
+  padding: 8px 14px; margin: 14px 0; color: #9fb2c4; font-size: 13px;
+}
+p { margin: 0 0 16px; }
+b { color: #ffd97a; }
+ul { padding-right: 26px; margin: 0 0 16px; }
+li { margin-bottom: 4px; }
+::selection { background: #2f6ea5; color: #fff; }
+::-webkit-scrollbar { width: 10px; }
+::-webkit-scrollbar-thumb { background: #2c3540; border-radius: 6px; }

@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>فهرست قوانین — عامل پژوهش حقوقی</title>
+<link rel="stylesheet" href="/ui/laws.css?v=3">
+</head>
+<body>
+<header>
+  <div class="brand">⚖️ عامل پژوهش حقوقی<small>قوانین بالادستی و حوزه‌ای ایران</small></div>
+  <nav>
+    <a href="/workspace">میز کار</a>
+    <a href="/ui/graph.html?v=3">گراف</a>
+    <a href="/ui/laws.html" class="active">قوانین</a>
+  </nav>
+</header>
+<div class="bar">
+  <input type="search" id="q" placeholder="جستجو در عنوان‌ها…">
+  <select id="f-kind">
+    <option value="all">همه انواع</option>
+    <option value="constitution">قانون اساسی</option>
+    <option value="statute">قانون</option>
+    <option value="regulation">مقررات</option>
+    <option value="circular">بخشنامه</option>
+    <option value="unknown">نامشخص</option>
+  </select>
+  <select id="f-tier">
+    <option value="">همه لایه‌ها</option>
+    <option value="1">۱ — اساسی</option>
+    <option value="2">۲ — خاص</option>
+    <option value="3">۳ — عادی</option>
+    <option value="4">۴ — مقررات</option>
+    <option value="5">۵ — بخشنامه</option>
+  </select>
+  <select id="f-status">
+    <option value="all">همه وضعیت‌ها</option>
+    <option value="effective">معتبر</option>
+    <option value="repealed">منسوخ</option>
+  </select>
+  <div class="count" id="count"></div>
+</div>
+<div class="wrap">
+  <table>
+    <thead><tr>
+      <th data-k="title">عنوان</th><th data-k="kind">نوع</th><th data-k="tier">لایه</th>
+      <th data-k="issuer">مرجع وضع</th><th data-k="legal_status">وضعیت</th>
+      <th data-k="provisions">ماده</th><th data-k="edges">روابط</th><th>سند</th>
+    </tr></thead>
+    <tbody id="rows"><tr><td colspan="8" class="muted">در حال بارگذاری…</td></tr></tbody>
+  </table>
+</div>
+<dialog id="doc">
+  <div class="dlg-head">
+    <b id="doc-title"></b>
+    <div style="display:flex; gap:10px; align-items:center;">
+      <div class="tabs" id="doc-tabs" style="display:none;">
+        <button class="tab active" id="tab-text">متن</button>
+        <button class="tab" id="tab-pdf">PDF</button>
+      </div>
+      <button class="close-x" onclick="byId('doc').close()">بستن ✕</button>
+    </div>
+  </div>
+  <div class="dlg-body" id="doc-body"></div>
+</dialog>
+<script src="/ui/laws.js?v=3"></script>
+</body>
+</html>

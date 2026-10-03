@@ -30,10 +30,10 @@ from ..verification import (
     GenerationMetadata,
     VerificationReport,
 )
-from .envelope import RefStore
+from .envelope import RefStore, ToolStatus
 from .planner import PlannerTurn, ToolPlanner
 from .skill_router import augment_system_prompt, skills_index
-from .tools import LegalResearchTools, ToolArgumentError, tool_catalog
+from .tools import LegalResearchTools, ToolArgumentError
 
 _SYSTEM_TEMPLATE = """شما ایجنت پژوهش حقوقی فقط-خواندن روی مخزن canonical هستید.
 
@@ -52,7 +52,9 @@ _SYSTEM_TEMPLATE = """شما ایجنت پژوهش حقوقی فقط-خواند�
 ۵. بهداشت کوئری: جست‌وجو فقط با ۲ تا ۴ کلیدواژه‌ی نهادی/حقوقی (نام مفاهیم، نه روایت).
    اسم اشخاص، جملات محاوره‌ای و تاریخ‌های محاوره‌ای را در کوئری نیاور؛ اعداد را رقمی
    بنویس (۳۰ نه «سی»). نردبان: search کوتاه → find_in_document روی سند مشخص →
-   list_documents برای جهت‌یابی → بازنویسی با مترادف حقوقی.
+   list_documents برای جهت‌یابی → بازنویسی با مترادف حقوقی. اگر نتایج EMPTY/PARTIAL
+   ضعیف بود: expand_search_terms برای کوئری‌های جایگزین و semantic_search برای
+   جست‌وجوی معنایی (اگر پاسخ ERROR داد یعنی در دسترس نیست، به واژگانی برگرد).
 ۶. پرسش‌های ترکیبی/پرونده‌ای را به وجوه بشکن (هر شخص، سند یا حکم یک وجه)؛ هر وجه را
    جدا تحقیق کن و claim جدا با evidence خودش بساز. پیش از answer پوشش همه‌ی وجوه را
    کنترل کن؛ وجهِ بدون اثر را یا ادامه بده یا در متن پاسخ صریحاً «پوشش ناقص» اعلام کن —
@@ -66,13 +68,17 @@ _SYSTEM_TEMPLATE = """شما ایجنت پژوهش حقوقی فقط-خواند�
 ۸. به‌محض پاسخ‌پذیر بودن پرسش، پاسخ نهایی را بده. بودجه: {budget_steps} فراخوانی ابزار/گام.
 ۹. ابزارهای موجود:
 {tool_catalog}
-
 {skills_index}
 
 ## قرارداد خروجی (الزامی) — دقیقاً یک شیء JSON:
 فراخوانی ابزار: {{"action":"tool","tool":"نام","args":{{...}},"thought":"..."}}
-پاسخ نهایی: {{"action":"answer","answer":"متن فارسی","claims":[{{"claim_id":"c1","text":"...","evidence_ids":["ev-..."],"importance":"critical|major|minor"}}]}}
+پاسخ نهایی: {{"action":"answer","answer":"متن فارسی","claims":[{{"claim_id":"c1","text":"...","evidence_ids":["ev-..."],"importance":"critical|major|minor"}}],"sufficiency":{{"level":"full|partial|insufficient","basis":"...","gaps":["..."]}}}}
 امتناع: {{"action":"abstain","reason":"..."}}
+
+## سطح کفایت (sufficiency) — الزامی برای هر answer:
+- "full": همه‌ی وجوه پرسش با evidence تأییدشده جواب داده‌اند. در این حالت gaps باید خالی باشد.
+- "partial": بخشی جواب داده و بخشی ناقص است — در gaps بنویس دقیقاً چه وجهی کامل نیست (پاسخ منتشر می‌شود ولی برچسب پوشش ناقص می‌خورد).
+- "insufficient": ادله برای نتیجه‌گیری کافی نیست — در gaps نام ببر چه سند/داده‌ای مفقود است. این سطح یعنی پاسخ منتشر نمی‌شود (مثل امتناع)؛ پس آن را فقط وقتی اعلام کن که واقعاً نتوانسته‌ای حتی پاسخ partial بدهی.
 """
 
 _CONTRACT_REMINDER = (
@@ -141,6 +147,13 @@ _BUDGET_WARNING = (
     "یا اگر ادله واقعاً کافی نیست، امتناع مستدل با ذکر دقیق مفقود."
 )
 
+_DEAD_END_WARNING = (
+    "هشدار بن‌بست: سه جست‌وجوی پیاپی بدون نتیجه انجام شده است. همین کوئری را با "
+    "چند واژه‌ی متفاوت تکرار نکن؛ یکی از این مسیرها: (۱) سند/فصل دیگری امتحان کن، "
+    "(۲) واژه‌های نهادی متفاوت به‌کار ببر، (۳) از بهتری یافته‌ها پاسخ بساز، یا (۴) "
+    "امتناع مستند با فهرست تلاش‌های انجام‌شده."
+)
+
 
 @dataclass(slots=True)
 class _RunState:
@@ -149,6 +162,7 @@ class _RunState:
     trace: list[ToolCallTrace] = field(default_factory=list)
     total_tokens: int = 0
     last_turn: PlannerTurn | None = None
+    consecutive_empty: int = 0
 
 
 class ToolResearchLoop:
@@ -254,6 +268,10 @@ class ToolResearchLoop:
                     ledger,
                     progress,
                 )
+                if state.consecutive_empty >= 3 and state.consecutive_empty % 3 == 0:
+                    state.steps.append(
+                        _StepRecord(step, "dead_end_warning", _DEAD_END_WARNING)
+                    )
                 if (
                     self.config.max_steps - step == 2
                     and not any(item.kind == "budget_warning" for item in state.steps)
@@ -302,6 +320,47 @@ class ToolResearchLoop:
                         )
                     )
                 claims = publishable
+                level = decision.sufficiency_level
+                if level == "insufficient":
+                    # Declared insufficiency routes to the honest incomplete
+                    # outcome: the assessment itself is the deliverable.
+                    reason = decision.sufficiency_basis or "; ".join(
+                        decision.sufficiency_gaps
+                    )
+                    draft = DraftAnswer(
+                        _answer_id(episode_id, step, f"insufficient|{reason}"),
+                        f"پاسخ صادر نشد — سطح کفایت اعلام‌شده: ناکافی. {reason}",
+                        (),
+                    )
+                    episode.identified_issues.append(
+                        IncompleteReason.DECLARED_ABSTENTION.value
+                    )
+                    episode.identified_issues.append("sufficiency_insufficient")
+                    report = self.verifier.verify(draft, ledger, applicable_time)
+                    self._record_dispositions(episode, ledger, dispositions)
+                    _emit(
+                        progress,
+                        {
+                            "type": "abstained",
+                            "step": step,
+                            "reason": reason or "insufficient",
+                        },
+                    )
+                    return ResearchOutcome(episode, ledger, draft, report, False, step)
+                if level == "full" and decision.sufficiency_gaps:
+                    # Declaring full coverage while listing gaps is a
+                    # contradiction the planner must resolve.
+                    state.steps.append(
+                        _StepRecord(
+                            step,
+                            "contract_error",
+                            "sufficiency=full هم‌زمان با gaps ناسازگار است؛ "
+                            "یا level=partial/insufficient بده یا gaps را بردار.\n"
+                            f"gaps: {json.dumps(decision.sufficiency_gaps, ensure_ascii=False)}",
+                            summary="CONTRACT-ERROR: sufficiency=full با gaps ناسازگار",
+                        )
+                    )
+                    continue
                 draft = DraftAnswer(
                     _answer_id(episode_id, step, decision.answer or ""),
                     decision.answer or "",
@@ -314,6 +373,10 @@ class ToolResearchLoop:
                 episode.answer_id = draft.answer_id
                 if report.accepted:
                     self.last_trace = tuple(state.trace)
+                    if level is not None:
+                        # Record the accepted answer's self-assessment so the
+                        # grader can score sufficiency agreement.
+                        episode.identified_issues.append(f"sufficiency_{level}")
                     _emit(progress, {"type": "verification_accepted", "step": step})
                     return ResearchOutcome(episode, ledger, draft, report, True, step)
                 state.steps.append(
@@ -395,6 +458,10 @@ class ToolResearchLoop:
             return
         latency = int((time.monotonic() - started) * 1000)
         envelope = result.envelope
+        if envelope.status is ToolStatus.EMPTY:
+            state.consecutive_empty += 1
+        else:
+            state.consecutive_empty = 0
         for evidence in result.evidence:
             if ledger.add(evidence):
                 episode.record(
@@ -520,7 +587,7 @@ class ToolResearchLoop:
     def _system_prompt(self) -> str:
         return _SYSTEM_TEMPLATE.format(
             budget_steps=self.config.max_steps,
-            tool_catalog=tool_catalog(),
+            tool_catalog=self.tools.tool_catalog(),
             skills_index=skills_index(),
         )
 

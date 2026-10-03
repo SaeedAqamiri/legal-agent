@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from legal_agent_core.agentic import AgenticConfig, LegalResearchTools, ToolResearchLoop
 from legal_agent_core.agentic.planner import LLMToolPlanner
+from legal_agent_core.agentic.term_expander import LLMTermExpander
 from legal_agent_core.adapters import OpenAICompatibleGateway
 from legal_agent_core.application import (
     InMemoryResearchRecordRepository,
@@ -87,7 +88,9 @@ def _probe(root: Path) -> list[str]:
     return missing
 
 
-def _build_service(repository, strategy: str, budgets: dict) -> ResearchApplicationService:
+def _build_service(
+    repository, strategy: str, budgets: dict
+) -> tuple[ResearchApplicationService, object | None]:
     citations = CitationPipeline(repository)
     verifier = EvidenceVerifier(repository)
     navigation = NavigationLoop(
@@ -100,7 +103,7 @@ def _build_service(repository, strategy: str, budgets: dict) -> ResearchApplicat
         if strategy == ResearchStrategy.AGENTIC.value
         else None
     )
-    return ResearchApplicationService(
+    service = ResearchApplicationService(
         navigation,
         citations,
         InMemoryResearchRecordRepository(),
@@ -109,6 +112,7 @@ def _build_service(repository, strategy: str, budgets: dict) -> ResearchApplicat
         id_factory=lambda: f"bench-{next(_counter)}",
         agentic=agentic,
     )
+    return service, agentic
 
 
 _counter = iter(range(1, 10_000))
@@ -147,8 +151,12 @@ def _build_agentic_loop(repository, verifier, budgets: dict):
     # contract, skills, tool catalog) itself — do not substitute a thinner
     # one here; the thin variant measurably degrades planner behavior.
     planner = LLMToolPlanner(gateway, provider, profile, agent_version="benchmark/1")
+    tools = LegalResearchTools(
+        repository,
+        term_expander=LLMTermExpander(gateway, provider, profile),
+    )
     return ToolResearchLoop(
-        LegalResearchTools(repository),
+        tools,
         planner,
         verifier,
         AgenticConfig(
@@ -214,7 +222,7 @@ def run(
             raise SystemExit("--shard must be N/M with 1 <= N <= M")
         cases = tuple(case for position, case in enumerate(cases) if position % count == index - 1)
 
-    service = _build_service(repository, strategy, budgets)
+    service, agentic_loop = _build_service(repository, strategy, budgets)
     grader = DeterministicGrader(document_map)
     principal = Principal("benchmark", "org-a", frozenset({Role.RESEARCHER}))
 
@@ -235,6 +243,18 @@ def run(
             grade = asdict(grader.grade(case, record.outcome, record.answer))
         except Exception as exc:  # noqa: BLE001 — one bad case must not kill the run
             grade = _failed_grade(case, exc)
+        if agentic_loop is not None:
+            grade["tool_trace"] = [
+                {
+                    "step": item.step,
+                    "tool": item.tool,
+                    "ok": item.ok,
+                    "status": item.status,
+                    "latency_ms": item.latency_ms,
+                    "args": json.dumps(item.args, ensure_ascii=False)[:200],
+                }
+                for item in agentic_loop.last_trace
+            ]
         grades.append(grade)
         print(
             f"[{index:2d}/{len(cases)}] {case.case_id} {case.category:<18} "

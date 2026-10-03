@@ -78,7 +78,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         "read_span",
-        "خواندن کامل یک تکه با صفحه‌ی دقیق؛ برای cite از همین evidence_id استفاده کنید",
+        "خواندن کامل یک تکه با صفحه‌ی دقیق؛ source_span_id یا evidence_id می‌پذیرد — برای cite از evidence_id برگشتی استفاده کنید",
         ("source_span_id", "applicable_time"),
     ),
     ToolSpec(
@@ -96,14 +96,33 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "همسایه‌های یک ماده در گراف: ارجاع‌های صریح خروجی و ورودی",
         ("provision_id", "applicable_time"),
     ),
+    ToolSpec(
+        "expand_search_terms",
+        "تولید کوئری‌های جایگزین با واژگان حقوقی وقتی جست‌وجوی واژگانی بن‌بست شد",
+        ("query",),
+    ),
+    ToolSpec(
+        "semantic_search",
+        "جست‌وجوی معنایی برداری روی تکه‌ها؛ برای وقتی واژه‌های پرسش در متن نیستند",
+        ("query", "applicable_time", "document?", "cursor?"),
+    ),
 )
 
 _TOOL_NAMES = frozenset(spec.name for spec in TOOL_SPECS)
 
 
-def tool_catalog() -> str:
-    """Planner-facing catalog appended to the system prompt."""
-    lines = [item.signature() + " — " + item.description for item in TOOL_SPECS]
+def tool_catalog(tools: LegalResearchTools | None = None) -> str:
+    """Planner-facing catalog appended to the system prompt.
+
+    With a ``LegalResearchTools`` instance, capability-gated tools are listed
+    only when configured (an unconfigured tool just wastes planner steps on
+    guaranteed ERROR envelopes). Without an instance, every tool is listed.
+    """
+    lines = []
+    for item in TOOL_SPECS:
+        if tools is not None and not tools.spec_available(item.name):
+            continue
+        lines.append(item.signature() + " — " + item.description)
     return "\n".join(lines)
 
 
@@ -119,12 +138,19 @@ class LegalResearchTools:
         canonical: CanonicalRepository,
         research_graph: ResearchGraphRepository | None = None,
         items_per_page: int = 10,
+        term_expander: Any | None = None,
+        semantic_index: Any | None = None,
     ) -> None:
         if items_per_page < 1:
             raise DomainError("items_per_page must be positive")
         self.canonical = canonical
         self.research_graph = research_graph
         self.items_per_page = items_per_page
+        self.term_expander = term_expander
+        self.semantic_index = semantic_index
+        #: evidence_id -> source_span_id, populated as tools build evidence so
+        #: read_span can accept either identifier.
+        self.evidence_index: dict[str, str] = {}
 
     def dispatch(self, store: RefStore, name: str, args: dict[str, Any]) -> ToolResult:
         if not is_known_tool(name):
@@ -133,6 +159,18 @@ class LegalResearchTools:
             raise ToolArgumentError("tool args must be an object")
         handler = getattr(self, f"_{name}")
         return handler(store, args)
+
+    def spec_available(self, name: str) -> bool:
+        """Capability gates: LLM-dependent and embedding-dependent tools are
+        only advertised when their backing service is configured."""
+        if name == "semantic_search":
+            return self.semantic_index is not None
+        if name == "expand_search_terms":
+            return self.term_expander is not None
+        return True
+
+    def tool_catalog(self) -> str:
+        return tool_catalog(self)
 
     # ------------------------------------------------------------------ tools
 
@@ -563,7 +601,8 @@ class LegalResearchTools:
                 )
             )
 
-        matches: list[tuple[float, Any, Any, Any, Any]] = []
+        strict_matches: list[tuple[float, Any, Any, Any, Any]] = []
+        partial_matches: list[tuple[float, Any, Any, Any, Any]] = []
         for version in self.canonical.list_provision_versions():
             if allowed_versions is not None and version.document_version_id not in allowed_versions:
                 continue
@@ -580,11 +619,27 @@ class LegalResearchTools:
                 if page_to is not None and span.page_number > page_to:
                     continue
                 span_tokens = search_tokens(span.raw_text)
-                if not query_tokens <= span_tokens:
-                    continue  # grep semantics: every query token must appear
+                overlap = query_tokens & span_tokens
+                if not overlap:
+                    continue
                 score = _overlap(query_tokens, span_tokens)
-                matches.append((score, span, version, provision, instrument))
+                if query_tokens <= span_tokens:
+                    strict_matches.append((score, span, version, provision, instrument))
+                else:
+                    # Vocabulary mismatch (noisy OCR, alternate legal terms):
+                    # keep the best partial leads instead of a dead end.
+                    partial_matches.append((score, span, version, provision, instrument))
 
+        matches = strict_matches or sorted(
+            partial_matches,
+            key=lambda item: (
+                -item[0],
+                item[1].page_number,
+                item[2].provision_version_id,
+                item[1].source_span_id,
+            ),
+        )
+        partial_mode = not strict_matches and bool(partial_matches)
         matches.sort(
             key=lambda item: (
                 -item[0],
@@ -605,7 +660,7 @@ class LegalResearchTools:
                 meta["document"] = document
             if total == 0:
                 meta["hint"] = (
-                    "هیچ تکه‌ای همه‌ی واژه‌ها را نداشت؛ واژه‌ها را کمتر/کلی‌تر کنید "
+                    "هیچ تکه‌ای حتی یک واژه از پرسش را نداشت؛ واژه‌ها را کلی‌تر کنید "
                     "یا با list_documents جهت‌یابی کنید."
                 )
             return ToolResult(empty_envelope(store, status, errors, meta=meta))
@@ -624,14 +679,33 @@ class LegalResearchTools:
             items.append(
                 self._grep_item(span, version, provision, instrument, ev, score, query_tokens)
             )
+        if partial_mode:
+            items = [dict(item, matched_tokens="partial") for item in items]
         has_next = start + self.items_per_page < total
+        meta = {
+            "query": query,
+            "page": page,
+            "deterministic": True,
+            **(
+                {
+                    "partial_match": True,
+                    "note": (
+                        "هیچ تکه‌ای همه‌ی واژه‌های پرسش را نداشت؛ این‌ها نزدیک‌ترین نتایج "
+                        "بر حسب تعداد واژه‌ی حاضرند. واژه‌ها را بازنویسی کنید یا همین‌ها را بخوانید."
+                    ),
+                }
+                if partial_mode
+                else {}
+            ),
+        }
         envelope = make_envelope(
             store,
             tuple(items),
             total_count=total,
             has_next_page=has_next,
             next_cursor=f"p{page + 1}" if has_next else None,
-            meta={"query": query, "page": page, "deterministic": True},
+            status=ToolStatus.PARTIAL if partial_mode else ToolStatus.OK,
+            meta=meta,
         )
         return ToolResult(envelope, tuple(evidence))
 
@@ -640,13 +714,28 @@ class LegalResearchTools:
         applicable_time = require_date(args, "applicable_time")
         if set(args) - {"source_span_id", "applicable_time"}:
             raise ToolArgumentError("unexpected tool args")
+        span = None
         try:
             span = self.canonical.get_source_span(source_span_id)
         except NotFoundError:
+            # Planners often hand an evidence_id here (observed in benchmark
+            # logs); resolve it through the index this session populated.
+            resolved = self.evidence_index.get(source_span_id)
+            if resolved:
+                try:
+                    span = self.canonical.get_source_span(resolved)
+                except NotFoundError:
+                    span = None
+        if span is None:
+            hint = (
+                "این شناسه یک evidence_id ناشناخته است؛ source_span_id را از "
+                "items خروجی ابزارها بردارید (به شکل span_...) — یا ابتدا "
+                "find_in_document/search_provisions صدا بزنید."
+                if source_span_id.startswith("ev-")
+                else f"span {source_span_id!r} در مخزن نیست"
+            )
             return ToolResult(
-                empty_envelope(
-                    store, ToolStatus.NOT_FOUND, (f"unknown span {source_span_id!r}",)
-                )
+                empty_envelope(store, ToolStatus.NOT_FOUND, (hint,))
             )
         version = self.canonical.get_provision_version(span.provision_version_id)
         provision = self.canonical.get_provision(version.provision_id)
@@ -736,6 +825,21 @@ class LegalResearchTools:
             }
             for _, _, version, provision, span in rows
         ]
+        # The chapter/section map always rides along in meta so one call
+        # doubles as the document's table of contents, independent of paging.
+        sections = [
+            {
+                "label": provision.label,
+                "title": provision.title,
+                "page": span.page_number if span else None,
+                "provision_id": provision.provision_id,
+            }
+            for _, _, version, provision, span in rows
+            if provision.title and provision.provision_type in (
+                provision.provision_type.CHAPTER,
+                provision.provision_type.PART,
+            )
+        ]
         envelope = make_envelope(
             store,
             tuple(items),
@@ -743,7 +847,9 @@ class LegalResearchTools:
             meta={
                 "document": document,
                 "document_version_ids": sorted(allowed_versions),
-                "hint": "برای متن کامل، read_span با source_span_id را صدا بزنید.",
+                "sections": sections,
+                "hint": "برای متن کامل، read_span با source_span_id را صدا بزنید؛ "
+                "برای جست‌وجو در محدوده‌ی یک بخش، page_from/page_to را با صفحه‌ی فصل تنظیم کنید.",
             },
         )
         return ToolResult(envelope)
@@ -976,6 +1082,123 @@ class LegalResearchTools:
         )
         return ToolResult(envelope, tuple(evidence))
 
+    def _expand_search_terms(self, store: RefStore, args: dict[str, Any]) -> ToolResult:
+        """LLM-generated legal-register rephrasings for lexical dead-ends."""
+        query = require_str(args, "query")
+        if set(args) - {"query"}:
+            raise ToolArgumentError("unexpected tool args")
+        if self.term_expander is None:
+            message = (
+                "term expansion سرویس تنظیم نشده است (LEGAL_AGENT_LLM_* env)؛ "
+                "خودتان واژه‌ها را بازنویسی کنید"
+            )
+            return ToolResult(empty_envelope(store, ToolStatus.ERROR, (message,)))
+        try:
+            terms = self.term_expander.expand(query)
+        except DomainError as exc:
+            return ToolResult(
+                empty_envelope(
+                    store,
+                    ToolStatus.ERROR,
+                    (f"term expansion failed: {exc}",),
+                )
+            )
+        if not terms:
+            return ToolResult(empty_envelope(store, ToolStatus.EMPTY))
+        envelope = make_envelope(
+            store,
+            tuple({"suggested_query": term} for term in terms),
+            total_count=len(terms),
+            meta={"hint": "این کوئری‌ها را با search_provisions/find_in_document امتحان کنید."},
+        )
+        return ToolResult(envelope)
+
+    def _semantic_search(self, store: RefStore, args: dict[str, Any]) -> ToolResult:
+        """Vector similarity over page-level spans; canonical evidence out."""
+        query = require_str(args, "query")
+        applicable_time = require_date(args, "applicable_time")
+        document = optional_str(args, "document")
+        cursor = optional_cursor(args)
+        if set(args) - {"query", "applicable_time", "document", "cursor"}:
+            raise ToolArgumentError("unexpected tool args")
+        if self.semantic_index is None:
+            message = (
+                "semantic search تنظیم نشده است (LEGAL_AGENT_EMBEDDINGS_* env)؛ "
+                "از search_provisions/find_in_document استفاده کنید"
+            )
+            return ToolResult(empty_envelope(store, ToolStatus.ERROR, (message,)))
+        try:
+            top = self.semantic_index.query(query, top_k=64)
+        except DomainError as exc:
+            return ToolResult(
+                empty_envelope(store, ToolStatus.ERROR, (f"semantic index failed: {exc}",))
+            )
+        allowed_versions = self._resolve_document_versions(document, applicable_time)
+        if document is not None and not allowed_versions:
+            return ToolResult(
+                empty_envelope(
+                    store,
+                    ToolStatus.NOT_FOUND,
+                    (f"no document matched {document!r}",),
+                    meta={"document": document},
+                )
+            )
+
+        rows: list[tuple[float, Any, Any, Any, Any, Any]] = []
+        for hit in top:
+            version = self.canonical.get_provision_version(hit.span.provision_version_id)
+            if allowed_versions is not None and version.document_version_id not in allowed_versions:
+                continue
+            if not self._applicable(version, applicable_time):
+                continue
+            provision = self.canonical.get_provision(version.provision_id)
+            instrument = self.canonical.get_instrument(provision.instrument_id)
+            spans = self.canonical.source_spans_for_version(version.provision_version_id)
+            span = next(
+                (item for item in spans if item.source_span_id == hit.span.source_span_id),
+                spans[0] if spans else None,
+            )
+            if span is None:
+                continue
+            rows.append((hit.similarity, span, version, provision, instrument, hit))
+
+        total = len(rows)
+        page = cursor or 1
+        start = (page - 1) * self.items_per_page
+        rows_page = rows[start : start + self.items_per_page]
+        if not rows_page:
+            return ToolResult(
+                empty_envelope(
+                    store,
+                    ToolStatus.EMPTY if total == 0 else ToolStatus.NOT_FOUND,
+                    () if total == 0 else (f"page {page} is beyond {total} results",),
+                    meta={"query": query, "page": page},
+                )
+            )
+        items: list[dict[str, Any]] = []
+        evidence: list[Evidence] = []
+        for similarity, span, version, provision, instrument, _ in rows_page:
+            ev = self._evidence_for_span(
+                span,
+                version,
+                applicable_time,
+                method="agentic_semantic",
+                reason="semantic similarity match",
+            )
+            evidence.append(ev)
+            item = self._compact_item(version, provision, instrument, span, ev, similarity)
+            items.append(item)
+        has_next = start + self.items_per_page < total
+        envelope = make_envelope(
+            store,
+            tuple(items),
+            total_count=total,
+            has_next_page=has_next,
+            next_cursor=f"p{page + 1}" if has_next else None,
+            meta={"query": query, "page": page, "ranking": "cosine_similarity"},
+        )
+        return ToolResult(envelope, tuple(evidence))
+
     # ---------------------------------------------------------------- helpers
 
     def _resolve_document_versions(
@@ -1012,7 +1235,7 @@ class LegalResearchTools:
         if document is None:
             return None
         candidate = document.strip()
-        folded = candidate.casefold()
+        folded = _fold_title(candidate)
         allowed: set[str] = set()
         for document_version_id, entry in index.items():
             if candidate in {
@@ -1024,7 +1247,7 @@ class LegalResearchTools:
                     allowed.add(document_version_id)
                 continue
             if any(
-                folded in title.casefold() for title in entry["titles"] if title
+                folded in _fold_title(title) for title in entry["titles"] if title
             ) and entry["applies"]:
                 allowed.add(document_version_id)
         return allowed
@@ -1113,8 +1336,8 @@ class LegalResearchTools:
                 )
         return evidence, tuple(aux_evidence), tuple(aux_items)
 
-    @staticmethod
     def _evidence_for_span(
+        self,
         span: Any,
         version: Any,
         applicable_time: date,
@@ -1128,7 +1351,7 @@ class LegalResearchTools:
             f"{version.provision_version_id}|{span.source_span_id}|"
             f"{applicable_time.isoformat()}|{method}"
         )
-        return Evidence(
+        evidence = Evidence(
             evidence_id=f"ev-{hashlib.sha256(identity.encode()).hexdigest()[:24]}",
             document_id=span.source_document_id,
             document_version_id=version.document_version_id,
@@ -1141,6 +1364,11 @@ class LegalResearchTools:
             reason_selected=reason,
             applicable_time=applicable_time,
         )
+        # Models frequently pass evidence ids where span ids are expected
+        # (observed in 5 benchmark cases); keep a reverse index so
+        # read_span can resolve either identifier.
+        self.evidence_index[evidence.evidence_id] = span.source_span_id
+        return evidence
 
     def _compact_item(
         self,
@@ -1211,8 +1439,8 @@ class LegalResearchTools:
             if candidate in identifiers:
                 matched.add(token)
                 continue
-            folded = candidate.casefold()
-            if any(folded in title.casefold() for title in titles if title):
+            folded = _fold_title(candidate)
+            if any(folded in _fold_title(title) for title in titles if title):
                 matched.add(token)
         return bool(matched), matched
 
@@ -1308,6 +1536,15 @@ def _overlap(query: frozenset[str], document: frozenset[str]) -> float:
     if not query or not document:
         return 0.0
     return len(query & document) / len(query)
+
+
+def _fold_title(text: str) -> str:
+    """Casefold + drop invisible joiners so model-typed titles match.
+
+    Planners omit the Persian zero-width non-joiner («بیمهای» vs
+    «بیمه‌ای»); casefold alone does not reconcile them.
+    """
+    return text.casefold().replace("\u200c", "").replace("\u200f", "").strip()
 
 
 def _excerpt(text: str, limit: int = EXCERPT_CHARS) -> str:

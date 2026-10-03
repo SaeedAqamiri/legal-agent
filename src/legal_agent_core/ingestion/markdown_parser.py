@@ -36,15 +36,32 @@ _ORDINAL_WORDS = (
 )
 # Structural legal-item markers that begin a provision. Besides numeric
 # labels («ماده ۴») this recognises the single-article formula
-# («ماده واحده») and ordinal-word labels («ماده اول»), plus Persian
-# list delimiters such as «۱ ـ» (tatweel) and en/em dashes.
+# («ماده واحده»), ordinal-word labels («ماده اول»), chapter/section
+# headings with ordinal words («فصل دوم: بازداشت اموال» — the title after
+# the colon becomes provision.title so the synthetic TOC is navigable),
+# plus Persian list delimiters such as «۱ ـ» (tatweel) and en/em dashes.
 _STRUCTURAL = re.compile(
-    r"^(?:\s|\u200c)*((?:بخش|ماده|تبصره|بند| آیین\u200cنامه)\s*"
+    r"^(?:\s|\u200c)*((?:بخش|ماده|تبصره|بند|فصل| آیین\u200cنامه)\s*"
     r"(?:[0-9۰-۹]+[\w۰-۹\-.]*|واحده?|" + _ORDINAL_WORDS + r"))"
     r"|^(?:\s|\u200c)*([0-9۰-۹]+)\s*[\)\-\.ـ–—]\s*"
     r"|^(?:\s|\u200c)*-\s*([0-9۰-۹]+)\s*",
     re.UNICODE,
 )
+_TITLE_SEPARATOR = re.compile(r"^[\s:：\-ـ–—]+")
+
+
+def section_title(remainder: str, label: str) -> str | None:
+    """Chapter/section headings carry their own topic («فصل دوم: بازداشت اموال»).
+
+    Returns the cleaned topic for فصل/بخش labels so it can be stored as the
+    provision title; None for numbered articles whose remainder is body text.
+    """
+    cleaned = _TITLE_SEPARATOR.sub("", remainder).strip()
+    if not cleaned:
+        return None
+    if label.strip().startswith(("فصل", "بخش")):
+        return cleaned[:200]
+    return None
 _HEADING = re.compile(r"^\s*#\s+(.*)")
 
 
@@ -65,6 +82,7 @@ class _ExtractedProvision:
     text: list[str]
     page: int
     pages: list[int] = field(default_factory=list)
+    title: str | None = None
 
 
 def parse_pages(content: str) -> Sequence[_AnnotatedLine]:
@@ -101,6 +119,7 @@ def extract_provisions(lines: Sequence[_AnnotatedLine]) -> tuple[_ExtractedProvi
                 text=[remainder] if remainder else [],
                 page=line.page,
                 pages=[line.page] if remainder else [],
+                title=section_title(remainder, label or ""),
             )
         elif current is not None:
             current.text.append(line.text)
@@ -187,6 +206,7 @@ def parse_markdown_document(
             ProvisionInput(
                 provision_type=_provision_type(item.label),
                 label=item.label,
+                title=item.title,
                 text="\n".join(item.text[:120]).strip()[:12_000],
                 normalized_text="\n".join(item.text[:60]).strip()[:6_000],
                 raw_text=raw_text,
@@ -194,7 +214,7 @@ def parse_markdown_document(
                 page_segments=segments,
                 ordinal=index,
                 status=DocumentStatus.EFFECTIVE,
-                created_from="markdown:v2",
+                created_from="markdown:v3",
             )
         )
     provisions = tuple(provisions)
@@ -234,6 +254,8 @@ def _provision_type(label: str) -> object:
     lowered = label.strip()
     if lowered.startswith("تبصره"):
         return ProvisionType.NOTE
+    if lowered.startswith("فصل"):
+        return ProvisionType.CHAPTER
     if lowered.startswith("بخش"):
         return ProvisionType.PART
     if lowered.startswith("بند"):

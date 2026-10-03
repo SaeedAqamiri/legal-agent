@@ -38,10 +38,16 @@ class McpHandshakeTests(unittest.TestCase):
     def test_tools_list_matches_catalog(self) -> None:
         response = self.server.handle(_request("tools/list"))
         tools = response["result"]["tools"]
-        self.assertEqual(
-            [tool["name"] for tool in tools],
-            [spec.name for spec in TOOL_SPECS],
-        )
+        listed = [tool["name"] for tool in tools]
+        # capability-gated tools are hidden when their service is unconfigured
+        self.assertNotIn("semantic_search", listed)
+        self.assertNotIn("expand_search_terms", listed)
+        expected = [
+            spec.name
+            for spec in TOOL_SPECS
+            if spec.name not in ("semantic_search", "expand_search_terms")
+        ]
+        self.assertEqual(listed, expected)
         schema = tool_schema("search_provisions")
         self.assertEqual(schema["required"], ["query", "applicable_time"])
         self.assertIn("document_scope", schema["properties"])

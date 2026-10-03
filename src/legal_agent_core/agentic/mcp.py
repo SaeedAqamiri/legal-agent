@@ -113,6 +113,7 @@ class McpToolServer:
                         "inputSchema": tool_schema(spec.name),
                     }
                     for spec in TOOL_SPECS
+                    if self.tools.spec_available(spec.name)
                 ]
             }
         if method == "tools/call":

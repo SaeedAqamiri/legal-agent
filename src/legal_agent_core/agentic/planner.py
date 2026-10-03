@@ -20,6 +20,9 @@ from ..llm import (
 )
 
 
+SUFFICIENCY_LEVELS = ("full", "partial", "insufficient")
+
+
 @dataclass(frozen=True, slots=True)
 class PlannerDecision:
     action: str  # "tool" | "answer" | "abstain"
@@ -29,6 +32,10 @@ class PlannerDecision:
     answer: str | None = None
     claims: tuple[dict[str, Any], ...] = ()
     abstention_reason: str | None = None
+    #: Structured self-assessment attached to an "answer" decision.
+    sufficiency_level: str | None = None
+    sufficiency_basis: str | None = None
+    sufficiency_gaps: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,8 +136,38 @@ def _parse_decision(
             return None, "answer decision requires non-empty 'answer' text"
         if not isinstance(claims, list) or not all(isinstance(item, dict) for item in claims):
             return None, "answer decision requires a list of claim objects"
+        level = basis = None
+        gaps: tuple[str, ...] = ()
+        sufficiency = payload.get("sufficiency")
+        if sufficiency is not None:
+            if not isinstance(sufficiency, dict):
+                return None, "'sufficiency' must be an object"
+            level = sufficiency.get("level")
+            if level not in SUFFICIENCY_LEVELS:
+                return None, (
+                    f"sufficiency.level must be one of {SUFFICIENCY_LEVELS}"
+                )
+            basis = sufficiency.get("basis")
+            if basis is not None and not isinstance(basis, str):
+                return None, "'sufficiency.basis' must be a string"
+            raw_gaps = sufficiency.get("gaps", [])
+            if not isinstance(raw_gaps, list) or not all(
+                isinstance(item, str) for item in raw_gaps
+            ):
+                return None, "'sufficiency.gaps' must be a list of strings"
+            gaps = tuple(item for item in raw_gaps if item.strip())
+            if level == "insufficient" and not gaps and not (basis or "").strip():
+                return None, (
+                    "sufficiency=insufficient requires 'gaps' or 'basis' "
+                    "naming what the corpus is missing"
+                )
         return PlannerDecision(
-            "answer", answer=answer, claims=tuple(claims)
+            "answer",
+            answer=answer,
+            claims=tuple(claims),
+            sufficiency_level=level,
+            sufficiency_basis=basis,
+            sufficiency_gaps=gaps,
         ), None
     if action == "abstain":
         reason = payload.get("reason")

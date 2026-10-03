@@ -186,6 +186,37 @@ class CaseGrade:
     cited_documents: tuple[str, ...]
     iterations: int = 0
     identified_issues: tuple[str, ...] = ()
+    #: Documents whose evidence entered the ledger in ANY disposition —
+    #  separates "the model never found it" from "found but not published".
+    touched_documents: tuple[str, ...] = ()
+    sufficiency_declared: str | None = None
+    sufficiency_agreement: bool | None = None
+
+
+def _declared_sufficiency(issues: Iterable[str]) -> str | None:
+    """Read the answer's declared sufficiency level from the episode."""
+    fallback = None
+    for issue in issues:
+        if issue.startswith("sufficiency_"):
+            return issue.split("_", 1)[1]
+        if issue == "declared_abstention":
+            fallback = INSUFFICIENT
+    return fallback
+
+
+def sufficiency_agreement(declared: str | None, answerability: str) -> bool | None:
+    """Does the declared level match the gold answerability?
+
+    ``None`` (no declaration) is only assessable for legacy answers, which
+    are excluded from the agreement rate rather than judged.
+    """
+    if declared is None:
+        return None
+    if answerability == ANSWERABLE:
+        return declared == "full"
+    if answerability == PARTIAL:
+        return declared == "partial"
+    return declared == INSUFFICIENT
 
 
 class DeterministicGrader:
@@ -226,6 +257,11 @@ class DeterministicGrader:
                     pages_by_doc.setdefault(doc, set()).add(evidence.page)
 
         ordered_cited = tuple(sorted(cited_documents))
+        touched: set[str] = set()
+        for entry in outcome.ledger.entries:
+            doc = self._doc_for_source(entry.evidence.document_id)
+            if doc is not None:
+                touched.add(doc)
         required = set(case.required_documents)
         hit = cited_documents & required
         recall = len(hit) / len(required) if required else 1.0
@@ -287,6 +323,7 @@ class DeterministicGrader:
             cited_documents=ordered_cited,
             iterations=outcome.iterations,
             identified_issues=tuple(outcome.episode.identified_issues),
+            touched_documents=tuple(sorted(touched)),
         )
 
     def _doc_for_instrument(self, instrument_id: str) -> str | None:

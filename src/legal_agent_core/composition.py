@@ -28,6 +28,7 @@ from .demo import _canonical_data, _DemoComposer, _DemoToolPlanner
 from .errors import DomainError, NotFoundError
 from .evaluation import EvaluationRunner
 from .in_memory import InMemoryResearchGraphRepository
+from .library import DocumentLibraryService
 from .navigation import NavigationLoop
 from .observability import MetricsRegistry
 from .research import Actor, ProgressiveEdgeType, ProgressiveRelation, TruthClass
@@ -318,6 +319,19 @@ def create_app_from_env(settings: Settings | None = None) -> FastAPI:
             ),
         )
 
+    default_principal = Principal(
+        "local-user",
+        settings.default_organization_id,
+        frozenset({
+            Role.RESEARCHER,
+            Role.LEGAL_EXPERT,
+            Role.KNOWLEDGE_STEWARD,
+            Role.EVALUATOR,
+            Role.INGESTION_OPERATOR,
+            Role.ADMIN,
+        }),
+    )
+
     return create_app(
         APIContainer(
             research,
@@ -326,8 +340,10 @@ def create_app_from_env(settings: Settings | None = None) -> FastAPI:
             token_verifier,
             authorization,
             metrics,
+            library=DocumentLibraryService(canonical, authorization),
             history=history,
             oidc=oidc,
+            default_principal=default_principal,
         )
     )
 

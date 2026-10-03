@@ -13,6 +13,7 @@ from .postgres import (
     PostgresUnitOfWork,
 )
 from .postgres_ingestion import PostgresIngestionRepository, PostgresIngestionWorker
+from .vlm_ocr import VLMOCRAdapter
 
 __all__ = [
     "FalkorResearchGraphRepository",
@@ -26,4 +27,5 @@ __all__ = [
     "PostgresUnitOfWork",
     "SessionTokenVerifier",
     "UrllibJsonTransport",
+    "VLMOCRAdapter",
 ]
