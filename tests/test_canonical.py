@@ -130,6 +130,38 @@ class CanonicalModelTests(unittest.TestCase):
                 provenance,
             )
 
+    def test_judicial_and_conflict_edge_types_are_accepted(self) -> None:
+        repository = seeded_repository()
+        repository.add_instrument(
+            LegalInstrument("inst-2", "رأی وحدت رویه نمونه", "رأی وحدت رویه نمونه", InstrumentType.JUDGMENT, "IR")
+        )
+        repository.add_instrument(
+            LegalInstrument("inst-3", "نظریه مشورتی نمونه", "نظریه مشورتی نمونه", InstrumentType.ADVISORY_OPINION, "IR")
+        )
+        provenance = Provenance("cats-extractor", CreationMethod.LLM_EXTRACTOR, "src-1")
+
+        repository.add_edge(
+            CanonicalEdge("edge-interp", "inst-2", "prov-5", CanonicalEdgeType.INTERPRETS, provenance)
+        )
+        repository.add_edge(
+            CanonicalEdge("edge-annul", "inst-2", "prov-5", CanonicalEdgeType.ANNULS, provenance)
+        )
+        repository.add_edge(
+            CanonicalEdge("edge-conflict", "inst-3", "inst-1", CanonicalEdgeType.CONFLICTS_WITH, provenance)
+        )
+
+        self.assertIn("edge-interp", repository.edges)
+        self.assertIn("edge-annul", repository.edges)
+        self.assertIn("edge-conflict", repository.edges)
+        self.assertEqual(repository.edges["edge-interp"].edge_type, CanonicalEdgeType.INTERPRETS)
+        self.assertEqual(InstrumentType.ADVISORY_OPINION.value, "advisory_opinion")
+
+    def test_new_edge_types_still_reject_self_loops(self) -> None:
+        provenance = Provenance("cats-extractor", CreationMethod.LLM_EXTRACTOR, "src-1")
+        for edge_type in (CanonicalEdgeType.INTERPRETS, CanonicalEdgeType.ANNULS, CanonicalEdgeType.CONFLICTS_WITH):
+            with self.assertRaisesRegex(DomainError, "itself"):
+                CanonicalEdge(f"edge-{edge_type.value}", "inst-1", "inst-1", edge_type, provenance)
+
 
 if __name__ == "__main__":
     unittest.main()

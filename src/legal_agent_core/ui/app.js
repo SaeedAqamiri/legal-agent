@@ -1,6 +1,6 @@
 "use strict";
 
-const state = { token: "", organizationId: "", research: null, library: null, reviewAction: null };
+const state = { organizationId: "", research: null, library: null, reviewAction: null };
 const byId = (id) => document.getElementById(id);
 const faNumber = new Intl.NumberFormat("fa-IR");
 const actionLabels = {
@@ -49,19 +49,17 @@ function toast(message, isError = false) {
   window.setTimeout(() => node.classList.remove("is-visible"), 3600);
 }
 function credentials() {
-  state.token = byId("access-token").value.trim();
   state.organizationId = byId("organization-id").value.trim();
-  if (!state.token || !state.organizationId) throw new Error("سازمان و توکن دسترسی را وارد کنید.");
+  if (!state.organizationId) throw new Error("نام سازمان را وارد کنید.");
   byId("connection-state").classList.add("is-connected");
   byId("connection-state").lastChild.textContent = " اتصال تنظیم شده";
-  return { token: state.token, organizationId: state.organizationId };
+  return { organizationId: state.organizationId };
 }
 
 async function request(path, options = {}) {
-  const { token } = credentials();
   const response = await fetch(path, {
     ...options,
-    headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json", ...(options.headers || {}) },
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
   });
   let payload = {};
   try { payload = await response.json(); } catch { payload = {}; }
@@ -396,13 +394,13 @@ function describeEvent(event) {
 }
 
 async function runResearchStream(body) {
-  const { token } = credentials();
+  credentials();
   byId("live-steps").classList.remove("is-hidden");
   clear(byId("live-steps-list"));
   const payload = { ...body, strategy: "agentic" };
   const response = await fetch("/v1/research/stream", {
     method: "POST",
-    headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
   if (!response.ok || !response.body) {
@@ -633,7 +631,7 @@ function connectSession() {
     credentials();
     byId("connection-state").classList.add("is-connected");
     byId("connection-state").lastChild.textContent = " اتصال برقرار است";
-    byId("connect-button").textContent = "وارد شد";
+    byId("connect-button").textContent = "متصل شد";
     toast("اتصال برقرار شد. اکنون بخش موردنظر را انتخاب کنید.");
     return true;
   } catch (error) {
@@ -661,13 +659,11 @@ document.querySelectorAll("[data-close-dialog]").forEach((button) => button.addE
 document.querySelectorAll("[data-close-session]").forEach((button) => button.addEventListener("click", () => byId("mobile-session-dialog").close()));
 byId("open-mobile-session").addEventListener("click", () => {
   byId("mobile-organization-id").value = byId("organization-id").value;
-  byId("mobile-access-token").value = byId("access-token").value;
   byId("mobile-session-dialog").showModal();
 });
 byId("mobile-session-form").addEventListener("submit", (event) => {
   event.preventDefault();
   byId("organization-id").value = byId("mobile-organization-id").value.trim();
-  byId("access-token").value = byId("mobile-access-token").value.trim();
   try { credentials(); byId("mobile-session-dialog").close(); toast("اتصال تنظیم شد."); }
   catch (error) { toast(error.message, true); }
 });
@@ -678,10 +674,6 @@ byId("refresh-review").addEventListener("click", loadReviewQueue);
 byId("refresh-history").addEventListener("click", loadHistory);
 byId("refresh-graph").addEventListener("click", loadResearchGraph);
 byId("review-form").addEventListener("submit", submitReview);
-byId("toggle-token").addEventListener("click", () => {
-  const input = byId("access-token"); input.type = input.type === "password" ? "text" : "password";
-  byId("toggle-token").textContent = input.type === "password" ? "نمایش" : "پنهان";
-});
 byId("applicable-time").value = new Date().toISOString().slice(0, 10);
 byId("library-date").value = byId("applicable-time").value;
 byId("applicable-time").value = new Date().toISOString().slice(0, 10);

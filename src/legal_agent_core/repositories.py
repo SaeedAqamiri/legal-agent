@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import date
+from typing import Any
 
 from .canonical import (
     CanonicalEdge,
@@ -79,7 +80,19 @@ class CanonicalRepository(ABC):
     def list_provisions(self) -> tuple[Provision, ...]: ...
 
     @abstractmethod
-    def list_provision_versions(self) -> tuple[ProvisionVersion, ...]: ...
+    def list_provision_versions(self, ids: Any = None) -> tuple[ProvisionVersion, ...]: ...
+
+    @abstractmethod
+    def edges_touching(self, node_id: str) -> tuple[CanonicalEdge, ...]: ...
+
+    def fts_search(self, query: str, limit: int = 512) -> dict[str, float] | None:
+        """Optional full-text prefilter: provision_version_id -> rank.
+
+        Returns ``None`` when the store has no full-text capability; callers
+        fall back to the exhaustive scan. Ranks are advisory — tools still
+        apply their own scoring, temporal gates and exact token checks.
+        """
+        return None
 
     @abstractmethod
     def source_spans_for_version(

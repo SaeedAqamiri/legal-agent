@@ -14,3 +14,13 @@ out
 # Notebook memory files written by the notes plugin
 .note.yaml
 **/.note.yaml
+.pgdata/
+.pgserver.log
+.server.log
+.s.PGSQL.*.lock
+
+# Vendored reference clone (never imported at runtime)
+PageIndex/
+
+# Stray local dir (laws-mcp workspace)
+/~/

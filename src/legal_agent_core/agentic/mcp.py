@@ -36,6 +36,7 @@ _ARG_PROPERTIES: dict[str, dict[str, Any]] = {
     "source_span_id": {"type": "string"},
     "document": {"type": "string"},
     "document_scope": {"type": "array", "items": {"type": "string"}},
+    "instrument": {"type": "string"},
     "page_from": {"type": "integer", "minimum": 1},
     "page_to": {"type": "integer", "minimum": 1},
     "cursor": {"type": "string"},

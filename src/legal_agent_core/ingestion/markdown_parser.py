@@ -10,6 +10,7 @@ entries (page-anchored, ordered) plus document metadata, without any OCR.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -83,6 +84,7 @@ class _ExtractedProvision:
     page: int
     pages: list[int] = field(default_factory=list)
     title: str | None = None
+    children: list[_ExtractedProvision] = field(default_factory=list)
 
 
 def parse_pages(content: str) -> Sequence[_AnnotatedLine]:
@@ -127,6 +129,37 @@ def extract_provisions(lines: Sequence[_AnnotatedLine]) -> tuple[_ExtractedProvi
     if current is not None and current.text:
         provisions.append(current)
     return tuple(provisions)
+
+
+def nest_extracted(
+    provisions: Sequence[_ExtractedProvision],
+) -> tuple[_ExtractedProvision, ...]:
+    """Group the flat document-ordered extraction into the legal forest.
+
+    Roots keep the flat shape (no containers in the document); provisions
+    under a فصل/بخش become its children and تبصره/بند/list items nest under
+    the current ماده. Pre-order equals the original order, so ordinals are
+    unaffected.
+    """
+    from .hierarchy import assign_parents, hierarchy_rank
+
+    ranks = [
+        hierarchy_rank(_provision_type_value(item.label), item.label)
+        for item in provisions
+    ]
+    parents = assign_parents(ranks)
+    forest: list[_ExtractedProvision] = []
+    for item, parent in zip(provisions, parents):
+        item.children = []
+        if parent is None:
+            forest.append(item)
+        else:
+            provisions[parent].children.append(item)
+    return tuple(forest)
+
+
+def _provision_type_value(label: str) -> str:
+    return _provision_type(label).value
 
 
 def page_segments(pages: Sequence[int], raw_text: str) -> tuple[PageSegment, ...]:
@@ -198,25 +231,8 @@ def parse_markdown_document(
 
     checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
     title = markdown_title(_first_heading(content), filename)
-    provisions = []
-    for index, item in enumerate(extracted):
-        raw_text = "\n".join(item.text).strip()[:12_000]
-        segments = page_segments(item.pages[: len(raw_text.split("\n"))], raw_text)
-        provisions.append(
-            ProvisionInput(
-                provision_type=_provision_type(item.label),
-                label=item.label,
-                title=item.title,
-                text="\n".join(item.text[:120]).strip()[:12_000],
-                normalized_text="\n".join(item.text[:60]).strip()[:6_000],
-                raw_text=raw_text,
-                page_number=item.page,
-                page_segments=segments,
-                ordinal=index,
-                status=DocumentStatus.EFFECTIVE,
-                created_from="markdown:v3",
-            )
-        )
+    ordinal_counter = itertools.count()
+    provisions = [_build_input(item, ordinal_counter) for item in nest_extracted(extracted)]
     provisions = tuple(provisions)
     source = SourceInput(
         filename=filename,
@@ -245,6 +261,27 @@ def parse_markdown_document(
         instrument=instrument,
         version=version,
         provisions=provisions,
+    )
+
+
+def _build_input(
+    item: _ExtractedProvision, ordinal_counter: itertools.count[int]
+) -> ProvisionInput:
+    raw_text = "\n".join(item.text).strip()[:12_000]
+    segments = page_segments(item.pages[: len(raw_text.split("\n"))], raw_text)
+    return ProvisionInput(
+        provision_type=_provision_type(item.label),
+        label=item.label,
+        title=item.title,
+        text="\n".join(item.text[:120]).strip()[:12_000],
+        normalized_text="\n".join(item.text[:60]).strip()[:6_000],
+        raw_text=raw_text,
+        page_number=item.page,
+        page_segments=segments,
+        ordinal=next(ordinal_counter),
+        status=DocumentStatus.EFFECTIVE,
+        created_from="markdown:v4",
+        children=tuple(_build_input(child, ordinal_counter) for child in item.children),
     )
 
 

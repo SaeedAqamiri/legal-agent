@@ -87,9 +87,21 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         ("document", "applicable_time"),
     ),
     ToolSpec(
+        "get_document_structure",
+        "نقشه‌ی درختی سند (بخش/فصل/ماده با بازه‌ی صفحه) برای جهت‌یابی در اسناد بلند؛ "
+        "اول ساختار را ببینید، سپس با page_from/page_to به بخش هدف بروید",
+        ("document", "applicable_time", "cursor?"),
+    ),
+    ToolSpec(
         "list_documents",
         "مرور کتابخانه اسناد بر اساس عنوان/موضوع",
         ("query?", "applicable_time"),
+    ),
+    ToolSpec(
+        "get_statute_family",
+        "خانواده‌ی قانون‌گذاری یک سند در جنگل قوانین: مبانی قانونی (به استنادِ) و "
+        "مشتقات آن — برای «کدام قانون حاکم است» از بالا به پایین",
+        ("instrument", "applicable_time"),
     ),
     ToolSpec(
         "get_related",
@@ -140,6 +152,8 @@ class LegalResearchTools:
         items_per_page: int = 10,
         term_expander: Any | None = None,
         semantic_index: Any | None = None,
+        structure_summaries: Any | None = None,
+        hidden_tools: frozenset[str] = frozenset(),
     ) -> None:
         if items_per_page < 1:
             raise DomainError("items_per_page must be positive")
@@ -148,9 +162,19 @@ class LegalResearchTools:
         self.items_per_page = items_per_page
         self.term_expander = term_expander
         self.semantic_index = semantic_index
+        #: provision_id -> Persian summary of container nodes (فصل/بخش),
+        #: produced offline by scripts/summarize_tree_nodes.py. Optional: the
+        #: structure outline works with labels/titles alone.
+        self.structure_summaries = structure_summaries
         #: evidence_id -> source_span_id, populated as tools build evidence so
         #: read_span can accept either identifier.
         self.evidence_index: dict[str, str] = {}
+        #: Lazily built docv_id -> metadata index (see _document_index); the
+        #: O(corpus) hydration happens at most once per instance.
+        self._document_index_cache: dict[str, dict[str, Any]] | None = None
+        #: Tool names removed from the planner catalog (A/B evaluation);
+        #: dispatch still works, so scripted/demo planners are unaffected.
+        self.hidden_tools = frozenset(hidden_tools)
 
     def dispatch(self, store: RefStore, name: str, args: dict[str, Any]) -> ToolResult:
         if not is_known_tool(name):
@@ -162,7 +186,10 @@ class LegalResearchTools:
 
     def spec_available(self, name: str) -> bool:
         """Capability gates: LLM-dependent and embedding-dependent tools are
-        only advertised when their backing service is configured."""
+        only advertised when their backing service is configured; A/B runs
+        can hide further tools via ``hidden_tools``."""
+        if name in self.hidden_tools:
+            return False
         if name == "semantic_search":
             return self.semantic_index is not None
         if name == "expand_search_terms":
@@ -191,7 +218,15 @@ class LegalResearchTools:
         versions: dict[str, tuple[Any, Any, Any]] = {}
         best_spans: dict[str, Any] = {}
         scope_unresolved = set(scope)
-        for version in self.canonical.list_provision_versions():
+        # FTS prefilter (OR semantics, advisory): bounds hydration on stores
+        # with full-text support; exact scoring below is unchanged.
+        candidate_ids, prefiltered = self._candidate_version_ids(query, limit=512)
+        version_rows = (
+            self.canonical.list_provision_versions(sorted(candidate_ids))
+            if candidate_ids is not None
+            else self.canonical.list_provision_versions()
+        )
+        for version in version_rows:
             if not self._applicable(version, applicable_time):
                 continue
             provision = self.canonical.get_provision(version.provision_id)
@@ -289,6 +324,8 @@ class LegalResearchTools:
 
         has_next = start + self.items_per_page < total
         meta: dict[str, Any] = {"query": query, "page": page, "referenced": referenced}
+        if prefiltered:
+            meta["prefilter"] = "fts"
         if scope and scope_unresolved:
             meta["scope_unresolved"] = sorted(scope_unresolved)
             meta["scope_hint"] = (
@@ -603,7 +640,17 @@ class LegalResearchTools:
 
         strict_matches: list[tuple[float, Any, Any, Any, Any]] = []
         partial_matches: list[tuple[float, Any, Any, Any, Any]] = []
-        for version in self.canonical.list_provision_versions():
+        # FTS prefilter (OR semantics = superset of the AND check below)
+        # bounds row hydration on Postgres; in-memory stores return None and
+        # keep the exhaustive scan.
+        candidate_ids, prefiltered = self._candidate_version_ids(query, limit=4096)
+        versions = (
+            self.canonical.list_provision_versions(sorted(candidate_ids))
+            if candidate_ids is not None
+            else self.canonical.list_provision_versions()
+        )
+        del prefiltered  # find_in_document reports match stats, not retrieval method
+        for version in versions:
             if allowed_versions is not None and version.document_version_id not in allowed_versions:
                 continue
             if not self._applicable(version, applicable_time):
@@ -849,10 +896,220 @@ class LegalResearchTools:
                 "document_version_ids": sorted(allowed_versions),
                 "sections": sections,
                 "hint": "برای متن کامل، read_span با source_span_id را صدا بزنید؛ "
-                "برای جست‌وجو در محدوده‌ی یک بخش، page_from/page_to را با صفحه‌ی فصل تنظیم کنید.",
+                "برای نقشه‌ی درختی سند (بخش/فصل با بازه‌ی صفحه) get_document_structure را "
+                "ببینید؛ برای جست‌وجو در محدوده‌ی یک بخش، page_from/page_to را با صفحه‌ی فصل تنظیم کنید.",
             },
         )
         return ToolResult(envelope)
+
+    def _get_document_structure(self, store: RefStore, args: dict[str, Any]) -> ToolResult:
+        """PageIndex-style orientation: the document's provision tree.
+
+        Returns a char-budgeted textual outline (labels + page ranges +
+        optional container summaries) paginated via the standard cursor, so
+        the planner can scope later page-filtered calls without reading text.
+        """
+        document = require_str(args, "document")
+        applicable_time = require_date(args, "applicable_time")
+        cursor = optional_cursor(args)
+        if set(args) - {"document", "applicable_time", "cursor"}:
+            raise ToolArgumentError("unexpected tool args")
+        allowed_versions = self._resolve_document_versions(document, applicable_time)
+        if not allowed_versions:
+            return ToolResult(
+                empty_envelope(
+                    store,
+                    ToolStatus.NOT_FOUND,
+                    (f"no document matched {document!r}",),
+                    meta={"document": document},
+                )
+            )
+        instruments = sorted(
+            {
+                self.canonical.get_document_version(document_version_id).instrument_id
+                for document_version_id in allowed_versions
+            }
+        )
+        from .structure import (
+            OUTLINE_CHAR_BUDGET,
+            StructureEntry,
+            build_outline,
+            render_outline,
+        )
+
+        entries: list[StructureEntry] = []
+        for provision in self.canonical.list_provisions():
+            if provision.instrument_id not in instruments:
+                continue
+            versions = self.canonical.applicable_provision_versions(
+                provision.provision_id, applicable_time
+            )
+            if not versions:
+                continue
+            spans = self.canonical.source_spans_for_version(versions[0].provision_version_id)
+            pages = [span.page_number for span in spans if span.page_number is not None]
+            summary = None
+            if self.structure_summaries is not None:
+                summary = self.structure_summaries.get(provision.provision_id)
+            entries.append(
+                StructureEntry(
+                    provision_id=provision.provision_id,
+                    label=provision.label,
+                    title=provision.title,
+                    provision_type=provision.provision_type.value,
+                    ordinal=provision.ordinal if provision.ordinal is not None else 0,
+                    parent_provision_id=provision.parent_provision_id,
+                    page=min(pages) if pages else None,
+                    end_page=max(pages) if pages else None,
+                    summary=summary,
+                )
+            )
+        if not entries:
+            return ToolResult(
+                empty_envelope(
+                    store,
+                    ToolStatus.EMPTY,
+                    meta={
+                        "document": document,
+                        "hint": "هیچ ماده‌ای از این سند در این تاریخ معتبر نیست.",
+                    },
+                )
+            )
+        entries.sort(key=lambda entry: (entry.ordinal, entry.provision_id))
+        tree, max_depth = build_outline(entries)
+        parts = render_outline(tree, OUTLINE_CHAR_BUDGET)
+        total_parts = max(1, len(parts))
+        page = min(max(cursor or 1, 1), total_parts)
+        has_next = page < total_parts
+        envelope = make_envelope(
+            store,
+            (),
+            total_count=tree["node_count"],
+            has_next_page=has_next,
+            next_cursor=f"p{page + 1}" if has_next else None,
+            meta={
+                "document": document,
+                "document_version_ids": sorted(allowed_versions),
+                "part": page,
+                "total_parts": total_parts,
+                "node_count": tree["node_count"],
+                "max_depth": max_depth,
+                "outline": parts[page - 1] if parts else "",
+                "hint": "نقشه‌ی سند: برچسب/عنوان + بازه‌ی صفحه. برای متن، read_span یا "
+                "list_document_contents را صدا بزنید؛ برای جست‌وجو در محدوده‌ی یک بخش، "
+                "find_in_document با page_from/page_to همان بازه.",
+                "next_steps": (
+                    [f"بخش بعدی نقشه با cursor: p{page + 1}"] if has_next else []
+                ),
+            },
+        )
+        return ToolResult(envelope)
+
+    def _get_statute_family(self, store: RefStore, args: dict[str, Any]) -> ToolResult:
+        """Corpus-level orientation: the instrument's statutory forest neighborhood.
+
+        Uses IMPLEMENTS edges (document -> its statutory basis) plus CITES
+        links from the enrichment pass, so the planner can reason top-down
+        about which law governs an issue before diving into provisions.
+        """
+        instrument_ref = require_str(args, "instrument")
+        # part of the uniform contract even though the edge family is
+        # time-independent (edges record relations, not versions)
+        require_date(args, "applicable_time")
+        if set(args) - {"instrument", "applicable_time"}:
+            raise ToolArgumentError("unexpected tool args")
+        instrument_id = self._resolve_instrument_id(instrument_ref)
+        if instrument_id is None:
+            return ToolResult(
+                empty_envelope(
+                    store,
+                    ToolStatus.NOT_FOUND,
+                    (f"no instrument matched {instrument_ref!r}",),
+                    meta={"instrument": instrument_ref},
+                )
+            )
+        instrument = self.canonical.get_instrument(instrument_id)
+        items: list[dict[str, Any]] = []
+        bases: list[dict[str, Any]] = []
+        derivatives: list[dict[str, Any]] = []
+        links: list[dict[str, Any]] = []
+        seen_edges: set[str] = set()
+        for edge in self.canonical.edges_touching(instrument_id):
+            if edge.edge_id in seen_edges:
+                continue
+            seen_edges.add(edge.edge_id)
+            outgoing = edge.source_node_id == instrument_id
+            other_id = edge.target_node_id if outgoing else edge.source_node_id
+            try:
+                other = self.canonical.get_instrument(other_id)
+                other_title = other.title
+                other_type = other.instrument_type.value
+            except NotFoundError:
+                # edges may also connect provisions/instruments missing here
+                other_title = None
+                other_type = None
+            entry = {
+                "instrument_id": other_id,
+                "title": other_title,
+                "instrument_type": other_type,
+                "edge_type": edge.edge_type.value,
+                "direction": "outgoing" if outgoing else "incoming",
+                "confidence": edge.confidence,
+            }
+            if edge.edge_type.value == "implements":
+                if outgoing:
+                    bases.append(entry)
+                else:
+                    derivatives.append(entry)
+            else:
+                links.append(entry)
+            items.append(entry)
+        if not items:
+            return ToolResult(
+                empty_envelope(
+                    store,
+                    ToolStatus.EMPTY,
+                    meta={
+                        "instrument": instrument.title,
+                        "instrument_id": instrument_id,
+                        "hint": "هیچ یال Implementes/CITES برای این سند ثبت نشده؛ "
+                        "برای ساختار درونی خود سند از get_document_structure استفاده کنید.",
+                    },
+                )
+            )
+        envelope = make_envelope(
+            store,
+            (),
+            total_count=len(items),
+            meta={
+                "instrument": instrument.title,
+                "instrument_id": instrument_id,
+                "statutory_bases": bases,
+                "instruments_implementing_it": derivatives,
+                "other_links": links,
+                "hint": "مبانی قانونی (statutory_bases) بالا دست‌اند — برای «حاکمیت» "
+                "از آن‌ها شروع کنید؛ instruments_implementing_it مشتقات این سندند. "
+                "برای متن هر سند، get_document_structure یا search_provisions با "
+                "document_scope همان سند.",
+            },
+        )
+        return ToolResult(envelope)
+
+    def _resolve_instrument_id(self, reference: str) -> str | None:
+        """Map an instrument id or title substring to one instrument id."""
+        candidate = reference.strip()
+        try:
+            self.canonical.get_instrument(candidate)
+            return candidate
+        except NotFoundError:
+            pass
+        folded = _fold_title(candidate)
+        for entry in self._document_index().values():
+            if any(
+                folded in _fold_title(title) for title in entry["titles"] if title
+            ):
+                return entry["instrument_id"]
+        return None
 
     def _list_documents(self, store: RefStore, args: dict[str, Any]) -> ToolResult:
         query = optional_str(args, "query")
@@ -1201,6 +1458,16 @@ class LegalResearchTools:
 
     # ---------------------------------------------------------------- helpers
 
+    def _candidate_version_ids(self, query: str, limit: int) -> tuple[set[str] | None, bool]:
+        """Full-text candidate set, or (None, False) when unsupported."""
+        try:
+            ranks = self.canonical.fts_search(query, limit=limit)
+        except Exception:  # noqa: BLE001 - prefilter must never break a tool
+            return None, False
+        if ranks is None:
+            return None, False
+        return set(ranks), True
+
     def _resolve_document_versions(
         self, document: str | None, applicable_time: date
     ) -> set[str] | None:
@@ -1209,14 +1476,46 @@ class LegalResearchTools:
         Accepts a document_version_id, instrument_id, source_document_id or an
         instrument-title substring (planners pass titles). ``None`` (no filter)
         means every document. An empty set means the reference matched nothing.
+
+        The id/title index is built once per instance (O(corpus) hydration is
+        the dominant cost on large stores); temporal applicability is computed
+        per call against the cached version rows and memoized by time.
         """
+        index = self._document_index()
+        if document is None:
+            return None
+        candidate = document.strip()
+        folded = _fold_title(candidate)
+        allowed: set[str] = set()
+        for document_version_id, entry in index.items():
+            by_id = candidate in {
+                document_version_id,
+                entry["instrument_id"],
+                entry["source_document_id"],
+            }
+            if not by_id and not any(
+                folded in _fold_title(title) for title in entry["titles"] if title
+            ):
+                continue
+            if self._entry_applies(document_version_id, entry, applicable_time):
+                allowed.add(document_version_id)
+        return allowed
+
+    def _document_index(self) -> dict[str, dict[str, Any]]:
+        """docv_id -> {instrument_id, source_document_id, titles, versions}.
+
+        Cached per LegalResearchTools instance; instrument rows ride along in
+        a second cache so repeated lookups stay free.
+        """
+        if self._document_index_cache is not None:
+            return self._document_index_cache
         index: dict[str, dict[str, Any]] = {}
         for version in self.canonical.list_provision_versions():
-            document_version = self.canonical.get_document_version(version.document_version_id)
-            instrument = self.canonical.get_instrument(document_version.instrument_id)
-            entry = index.setdefault(
-                version.document_version_id,
-                {
+            entry = index.get(version.document_version_id)
+            if entry is None:
+                document_version = self.canonical.get_document_version(version.document_version_id)
+                instrument = self.canonical.get_instrument(document_version.instrument_id)
+                entry = {
                     "instrument_id": instrument.instrument_id,
                     "source_document_id": document_version.source_document_id,
                     "titles": (
@@ -1224,33 +1523,25 @@ class LegalResearchTools:
                         instrument.canonical_title,
                         instrument.subject_domain or "",
                     ),
-                    "applies": document_version.applies_at(applicable_time)
-                    and version.applies_at(applicable_time),
-                },
+                    "versions": [],
+                }
+                index[version.document_version_id] = entry
+            entry["versions"].append(version)
+        self._document_index_cache = index
+        return index
+
+    def _entry_applies(
+        self, document_version_id: str, entry: dict[str, Any], applicable_time: date
+    ) -> bool:
+        memo = entry.setdefault("applies_at", {})
+        verdict = memo.get(applicable_time)
+        if verdict is None:
+            document_version = self.canonical.get_document_version(document_version_id)
+            verdict = document_version.applies_at(applicable_time) and any(
+                version.applies_at(applicable_time) for version in entry["versions"]
             )
-            entry["applies"] = entry["applies"] or (
-                document_version.applies_at(applicable_time)
-                and version.applies_at(applicable_time)
-            )
-        if document is None:
-            return None
-        candidate = document.strip()
-        folded = _fold_title(candidate)
-        allowed: set[str] = set()
-        for document_version_id, entry in index.items():
-            if candidate in {
-                document_version_id,
-                entry["instrument_id"],
-                entry["source_document_id"],
-            }:
-                if entry["applies"]:
-                    allowed.add(document_version_id)
-                continue
-            if any(
-                folded in _fold_title(title) for title in entry["titles"] if title
-            ) and entry["applies"]:
-                allowed.add(document_version_id)
-        return allowed
+            memo[applicable_time] = verdict
+        return verdict
 
     @staticmethod
     def _grep_item(

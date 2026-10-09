@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date
+from typing import Any
 
 from .canonical import (
     CanonicalEdge,
@@ -253,12 +254,22 @@ class InMemoryCanonicalRepository(CanonicalRepository):
             sorted(self.provisions.values(), key=lambda item: item.provision_id)
         )
 
-    def list_provision_versions(self) -> tuple[ProvisionVersion, ...]:
+    def list_provision_versions(
+        self, ids: Any = None
+    ) -> tuple[ProvisionVersion, ...]:
+        values = self.provision_versions.values()
+        if ids is not None:
+            selected = set(ids)
+            values = (item for item in values if item.provision_version_id in selected)
         return tuple(
-            sorted(
-                self.provision_versions.values(),
-                key=lambda item: item.provision_version_id,
-            )
+            sorted(values, key=lambda item: item.provision_version_id)
+        )
+
+    def edges_touching(self, node_id: str) -> tuple[CanonicalEdge, ...]:
+        return tuple(
+            edge
+            for edge in sorted(self.edges.values(), key=lambda item: item.edge_id)
+            if edge.source_node_id == node_id or edge.target_node_id == node_id
         )
 
     def source_spans_for_version(

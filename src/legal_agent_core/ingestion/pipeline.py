@@ -19,7 +19,7 @@ from ..canonical import (
     SourceDocument,
     SourceSpan,
 )
-from ..errors import NotFoundError
+from ..errors import ConflictError, NotFoundError
 from ..repositories import CanonicalRepository
 from .models import IngestionResult, ParsedDocument, ProvisionInput
 from .normalization import normalize_legal_text, normalize_number
@@ -95,7 +95,13 @@ class CanonicalIngestionPipeline:
             repealed_at=parsed.version.repealed_at,
         )
 
-        self.repository.add_source_document(source_document)
+        # Content-addressed identity: if the same document (checksum) was
+        # ingested before, keep the existing record — re-parses carry a fresh
+        # ingested_at timestamp and would otherwise trip the immutable guard.
+        try:
+            self.repository.get_source_document(source_document_id)
+        except NotFoundError:
+            self.repository.add_source_document(source_document)
         # Reuse an already-known instrument identity instead of re-adding it:
         # variant documents (same normalized canonical title) share one
         # instrument and only add new document versions.
@@ -158,7 +164,13 @@ class CanonicalIngestionPipeline:
                     resolved_target_provision_id=mention.resolved_target_provision_id,
                     confidence=mention.confidence,
                 )
-                self.repository.add_explicit_reference(reference)
+                try:
+                    self.repository.add_explicit_reference(reference)
+                except ConflictError:
+                    # A prior review/publish pass may have updated this
+                    # reference (resolution status/confidence); keep that
+                    # state instead of failing the whole ingest.
+                    continue
                 references.append(reference)
                 if mention.resolved_target_provision_id is None:
                     continue

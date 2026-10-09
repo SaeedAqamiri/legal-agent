@@ -448,16 +448,91 @@ class PostgresCanonicalRepository(CanonicalRepository):
         )
         return tuple(Provision(row[0], row[1], ProvisionType(row[2]), *row[3:]) for row in rows)
 
-    def list_provision_versions(self) -> tuple[ProvisionVersion, ...]:
+    def list_provision_versions(self, ids: Any = None) -> tuple[ProvisionVersion, ...]:
+        if ids is None:
+            rows = self._fetchall(
+                """
+                SELECT provision_version_id, provision_id, document_version_id, text,
+                       normalized_text, status, created_from, effective_from,
+                       effective_to, supersedes_version_id
+                FROM canonical.provision_versions ORDER BY provision_version_id
+                """
+            )
+        else:
+            selected = tuple(ids)
+            if not selected:
+                return ()
+            rows = self._fetchall(
+                """
+                SELECT provision_version_id, provision_id, document_version_id, text,
+                       normalized_text, status, created_from, effective_from,
+                       effective_to, supersedes_version_id
+                FROM canonical.provision_versions
+                WHERE provision_version_id = ANY(%s)
+                ORDER BY provision_version_id
+                """,
+                (list(selected),),
+            )
+        return tuple(self._provision_version(row) for row in rows)
+
+    def fts_search(self, query: str, limit: int = 512) -> dict[str, float] | None:
+        """GIN/tsvector prefilter over normalized_text (V0008).
+
+        OR semantics: a superset of the tools' AND-token check, so the exact
+        Python filter afterwards keeps precision while recall stays intact.
+        """
+        try:
+            rows = self._fetchall(
+                """
+                SELECT provision_version_id, ts_rank(tsv, query) AS rank
+                FROM canonical.provision_versions,
+                     websearch_to_tsquery('simple', %s) query
+                WHERE tsv @@ query
+                ORDER BY rank DESC
+                LIMIT %s
+                """,
+                (query, limit),
+            )
+        except Exception:  # noqa: BLE001 - prefilter is best-effort only
+            return None
+        return {row[0]: float(row[1]) for row in rows}
+
+    def edges_touching(self, node_id: str) -> tuple[CanonicalEdge, ...]:
+        from ..canonical import CanonicalEdgeType, CreationMethod, Provenance
+
         rows = self._fetchall(
             """
-            SELECT provision_version_id, provision_id, document_version_id, text,
-                   normalized_text, status, created_from, effective_from,
-                   effective_to, supersedes_version_id
-            FROM canonical.provision_versions ORDER BY provision_version_id
-            """
+            SELECT edge_id, source_node_id, target_node_id, edge_type,
+                   source_span_id, extraction_method, confidence, created_at,
+                   created_by, source_id, parser_version, model_id
+            FROM canonical.graph_edges
+            WHERE source_node_id = %s OR target_node_id = %s
+            ORDER BY edge_id
+            """,
+            (node_id, node_id),
         )
-        return tuple(self._provision_version(row) for row in rows)
+        edges = []
+        for row in rows:
+            provenance = Provenance(
+                created_by=row[8],
+                creation_method=CreationMethod(row[5]) if row[5] else CreationMethod.PARSER,
+                source_id=row[9],
+                created_at=row[7],
+                parser_version=row[10],
+                model_id=row[11],
+            )
+            edges.append(
+                CanonicalEdge(
+                    edge_id=row[0],
+                    source_node_id=row[1],
+                    target_node_id=row[2],
+                    edge_type=CanonicalEdgeType(row[3]),
+                    provenance=provenance,
+                    source_span_id=row[4],
+                    confidence=row[6],
+                )
+            )
+        return tuple(edges)
 
     def source_spans_for_version(self, provision_version_id: str) -> tuple[SourceSpan, ...]:
         rows = self._fetchall(

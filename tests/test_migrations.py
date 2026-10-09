@@ -41,7 +41,7 @@ class MigrationTests(unittest.TestCase):
     def test_loads_versioned_migration_with_stable_checksum(self) -> None:
         migrations = load_migrations()
 
-        self.assertEqual([item.version for item in migrations], [1, 2, 3, 4, 5])
+        self.assertEqual([item.version for item in migrations], [1, 2, 3, 4, 5, 6, 7, 8])
         self.assertEqual(migrations[0].name, "canonical_and_research_graph")
         self.assertEqual(len(migrations[0].checksum), 64)
 
@@ -73,7 +73,7 @@ class MigrationTests(unittest.TestCase):
 
         applied = apply_migrations(connection)
 
-        self.assertEqual(applied, (1, 2, 3, 4, 5))
+        self.assertEqual(applied, (1, 2, 3, 4, 5, 6, 7, 8))
         self.assertEqual(connection.commit_count, 1)
         self.assertEqual(connection.rollback_count, 0)
         insert_calls = [call for call in connection.fake_cursor.executed if "insert into" in call[0].lower()]
@@ -131,6 +131,21 @@ class MigrationTests(unittest.TestCase):
         self.assertIn("do NOT copy one into another", sql)
         self.assertIn("Denormalized cache for ops lists", sql)
         self.assertIn("A mere potential conflict is NOT a repeal", sql)
+
+    def test_cats_vocab_widens_staging_checks_for_judicial_corpus(self) -> None:
+        migration = load_migrations()[5]
+        sql = migration.sql.lower()
+
+        self.assertEqual(migration.name, "cats_judicial_vocab")
+        for fragment in (
+            "drop constraint if exists instruments_instrument_type_check",
+            "'advisory_opinion', 'policy', 'guideline'",
+            "drop constraint if exists source_documents_doc_kind_check",
+            "drop constraint if exists legal_effects_effect_type_check",
+            "'annul', 'interpret', 'conflict'",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, sql)
 
     def test_runner_is_idempotent_for_applied_migration(self) -> None:
         migration = load_migrations()[0]

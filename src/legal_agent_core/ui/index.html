@@ -42,6 +42,14 @@
             دانش تدریجی
             <span class="nav-count" id="graph-count">—</span>
           </button>
+          <a class="nav-item" href="/ui/graph.html">
+            <span class="nav-icon" aria-hidden="true">◈</span>
+            گراف دانش
+          </a>
+          <a class="nav-item" href="/ui/laws.html">
+            <span class="nav-icon" aria-hidden="true">▤</span>
+            مرور قوانین
+          </a>
           <button class="nav-item" type="button" data-panel="review-panel">
             <span class="nav-icon" aria-hidden="true">✓</span>
             صف بازبینی
@@ -50,20 +58,15 @@
         </nav>
 
         <section class="session-card" aria-labelledby="session-title">
-          <div class="section-label" id="session-title">اتصال امن</div>
+          <div class="section-label" id="session-title">اتصال</div>
           <label for="organization-id">سازمان</label>
           <input id="organization-id" value="org-a" maxlength="200" spellcheck="false">
-          <label for="access-token">توکن دسترسی</label>
-          <div class="password-field">
-            <input id="access-token" type="password" autocomplete="current-password" value="local">
-            <button id="toggle-token" type="button" aria-label="نمایش یا پنهان‌کردن توکن">نمایش</button>
-          </div>
           <div class="connection-state" id="connection-state">
             <span class="state-dot" aria-hidden="true"></span>
             آماده اتصال
           </div>
-          <button class="primary-button session-connect" id="connect-button" type="button">ورود</button>
-          <p>توکن فقط در حافظه همین صفحه نگهداری می‌شود.</p>
+          <button class="primary-button session-connect" id="connect-button" type="button">اتصال</button>
+          <p>حالت تک‌کاربر — بدون نیاز به ورود.</p>
         </section>
 
         <footer class="sidebar-footer">نسخه آزمایشی · Backend MVP</footer>
@@ -271,12 +274,9 @@
 
     <dialog id="mobile-session-dialog">
       <form id="mobile-session-form">
-        <div class="dialog-head"><div><span class="overline">اتصال امن</span><h2>ورود به فضای سازمان</h2></div><button type="button" data-close-session aria-label="بستن">×</button></div>
-        <p>توکن فقط تا زمان بازبودن همین صفحه در حافظه نگهداری می‌شود.</p>
+        <div class="dialog-head"><div><span class="overline">اتصال</span><h2>ورود به فضای سازمان</h2></div><button type="button" data-close-session aria-label="بستن">×</button></div>
         <label for="mobile-organization-id">سازمان</label>
         <input id="mobile-organization-id" maxlength="200" value="org-a" spellcheck="false">
-        <label for="mobile-access-token">توکن دسترسی</label>
-        <input id="mobile-access-token" type="password" autocomplete="current-password" placeholder="Bearer token">
         <div class="dialog-actions"><button class="secondary-button" type="button" data-close-session>انصراف</button><button class="primary-button" type="submit">ثبت اتصال</button></div>
       </form>
     </dialog>

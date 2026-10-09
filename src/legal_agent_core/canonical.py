@@ -41,6 +41,7 @@ class InstrumentType(StrEnum):
     GUIDELINE = "guideline"
     AMENDMENT = "amendment"
     APPENDIX = "appendix"
+    ADVISORY_OPINION = "advisory_opinion"
     OTHER = "other"
 
 
@@ -115,6 +116,9 @@ class CanonicalEdgeType(StrEnum):
     SUSPENDS = "suspends"
     RESTORES = "restores"
     IMPLEMENTS = "implements"
+    INTERPRETS = "interprets"
+    ANNULS = "annuls"
+    CONFLICTS_WITH = "conflicts_with"
 
 
 @dataclass(frozen=True, slots=True)

@@ -24,7 +24,13 @@ dev = ["ruff>=0.16,<1", "httpx2>=2,<3"]
 where = ["src"]
 
 [tool.setuptools.package-data]
-legal_agent_core = ["db/migrations/*.sql", "ui/*", "agentic/skills/*.md"]
+legal_agent_core = [
+    "db/migrations/*.sql",
+    "ui/*",
+    "ui/vendor/*",
+    "ui/vendor/fonts/*",
+    "agentic/skills/*.md",
+]
 
 [tool.ruff.lint.per-file-ignores]
 # the runner mutates sys.path before importing the package under src/

@@ -8,11 +8,13 @@ implementations when a service is not configured. This is the entry point for
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable
 from datetime import date
 from itertools import count
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 
@@ -258,6 +260,104 @@ def _seed_graph_memory(
     return memory
 
 
+def _structure_summaries(settings: Settings) -> Any:
+    """Lazy loader for offline container-node summaries (V0007 table).
+
+    Loaded once on first get_document_structure call; empty mapping when the
+    table or rows are absent (demo/in-memory mode).
+    """
+    if not settings.postgres.enabled:
+        return {}
+    import threading
+
+    import psycopg
+
+    lock = threading.Lock()
+    cache: dict[str, str] | None = None
+
+    def query() -> dict[str, str]:
+        nonlocal cache
+        with lock:
+            if cache is not None:
+                return cache
+            merged: dict[str, str] = {}
+            try:
+                with psycopg.connect(settings.postgres.dsn) as db:
+                    for provision_id, summary in db.execute(
+                        "SELECT provision_id, summary FROM canonical.provision_summaries"
+                    ).fetchall():
+                        merged[provision_id] = summary
+            except Exception:  # noqa: BLE001 - optional enrichment must never break tools
+                return {}
+            cache = merged
+            return merged
+
+    class _LazySummaries:
+        def get(self, key: str) -> str | None:
+            return query().get(key)
+
+    return _LazySummaries()
+
+
+def _agentic_extras(settings: Settings, canonical: Any) -> dict[str, Any]:
+    """Optional capability-gated tool backends, mirroring run_benchmark wiring.
+
+    - semantic_search: LEGAL_AGENT_EMBEDDINGS_BASE_URL (+ API_KEY/MODEL)
+    - expand_search_terms: LEGAL_AGENT_LLM_BASE_URL (+ LEGAL_AGENT_LLM_API_KEY)
+
+    Absent env = capability hidden from the planner catalog (spec_available).
+    Construction failures degrade to disabled, never break startup.
+    """
+    import os
+
+    logger = logging.getLogger(__name__)
+    extras: dict[str, Any] = {}
+    if os.environ.get("LEGAL_AGENT_EMBEDDINGS_BASE_URL"):
+        try:
+            from .agentic.semantic import OpenAIEmbeddingClient, SemanticSpanIndex
+
+            client = OpenAIEmbeddingClient.from_env()
+            extras["semantic_index"] = SemanticSpanIndex(canonical, client)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("semantic search disabled: %s", exc)
+    llm_key = os.environ.get("LEGAL_AGENT_LLM_API_KEY")
+    llm_base = os.environ.get("LEGAL_AGENT_LLM_BASE_URL")
+    if llm_key and llm_base:
+        try:
+            from .adapters import OpenAICompatibleGateway
+            from .agentic.term_expander import LLMTermExpander
+            from .llm import (
+                EndpointStyle,
+                LLMTask,
+                ModelProfile,
+                ProviderConfig,
+            )
+
+            provider = ProviderConfig(
+                "composition-llm",
+                llm_base,
+                EndpointStyle.CHAT_COMPLETIONS,
+                api_key=llm_key,
+            )
+            profile = ModelProfile(
+                profile_id="composition-expander",
+                version=1,
+                task=LLMTask.NAVIGATION,
+                provider_id="composition-llm",
+                model=os.environ.get("LEGAL_AGENT_LLM_MODEL", "glm-5.3-flash"),
+                prompt_id="term-expansion",
+                prompt_version=1,
+                max_output_tokens=1024,
+                temperature=0.1,
+            )
+            extras["term_expander"] = LLMTermExpander(
+                OpenAICompatibleGateway(), provider, profile
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("term expansion disabled: %s", exc)
+    return extras
+
+
 def create_app_from_env(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     canonical = _canonical_repository(settings)
@@ -280,7 +380,12 @@ def create_app_from_env(settings: Settings | None = None) -> FastAPI:
         metrics,
         id_factory=lambda: f"req-{next(identifiers)}",
         agentic=ToolResearchLoop(
-            LegalResearchTools(canonical, graph),
+            LegalResearchTools(
+                canonical,
+                graph,
+                structure_summaries=_structure_summaries(settings),
+                **_agentic_extras(settings, canonical),
+            ),
             _DemoToolPlanner(),
             EvidenceVerifier(canonical),
         ),

@@ -19,7 +19,6 @@ from ..llm import (
     ProviderResponse,
 )
 
-
 SUFFICIENCY_LEVELS = ("full", "partial", "insufficient")
 
 

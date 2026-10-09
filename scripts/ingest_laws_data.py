@@ -48,7 +48,7 @@ from legal_agent_core.ingestion.pipeline import CanonicalIngestionPipeline
 from legal_agent_core.jalali import parse_jalali_date
 
 DEFAULT_DATA_DIR = Path("~/hayula/laws-mcp/data").expanduser()
-DEFAULT_DSN = "postgresql://legal_agent:legal_agent@localhost:55432/legal_agent"
+DEFAULT_DSN = "postgresql://legal_agent:legal_agent@localhost:5432/legal_agent"
 SOURCE_ID = "ekhtebar"
 ORG = "hayula"
 

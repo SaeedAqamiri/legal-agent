@@ -35,7 +35,7 @@ import psycopg
 
 from legal_agent_core.ingestion.normalization import normalize_legal_text
 
-DEFAULT_DSN = "postgresql://legal_agent:legal_agent@localhost:55432/legal_agent"
+DEFAULT_DSN = "postgresql://legal_agent:legal_agent@localhost:5432/legal_agent"
 BASE_URL = "https://api.z.ai/api/coding/paas/v4"
 MODEL = "glm-5.3-flash"
 DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
@@ -47,10 +47,12 @@ EFFECT_EDGE = {
     "append": "amends",
     "supplement": "amends",
     "repeal": "repeals",
-    "annul": "repeals",
+    "annul": "annuls",
     "replace": "replaces",
     "suspend": "suspends",
     "restore": "restores",
+    "interpret": "interprets",
+    "conflict": "conflicts_with",
 }
 
 
@@ -69,11 +71,11 @@ def extract_json(text: str):
     return json.loads(candidate[start:])
 
 
-def llm_json(key: str, prompt: str, system: str, retries: int = 5) -> dict | list:
+def llm_json(key: str, prompt: str, system: str, retries: int = 5, max_tokens: int = 3000) -> dict | list:
     payload = {
         "model": MODEL,
         "temperature": 0.1,
-        "max_tokens": 3000,
+        "max_tokens": max_tokens,
         "thinking": {"type": "disabled"},
         "messages": [
             {"role": "system", "content": system},

@@ -154,6 +154,7 @@ def _build_agentic_loop(repository, verifier, budgets: dict):
     tools = LegalResearchTools(
         repository,
         term_expander=LLMTermExpander(gateway, provider, profile),
+        hidden_tools=frozenset(budgets.get("hidden_tools") or ()),
     )
     return ToolResearchLoop(
         tools,
@@ -171,7 +172,9 @@ DEFAULT_BUDGETS = {
     "max_steps": 16,
     "wall_seconds": 300.0,
     "max_total_tokens": 150_000,
-    "max_output_tokens": 2048,
+    # 2048 starves reasoning-capable flash models (glm-5.3-flash): thinking
+    # eats the cap and content comes back empty -> planner llm_error loops.
+    "max_output_tokens": 8192,
     "timeout_seconds": 90.0,
 }
 
@@ -435,6 +438,11 @@ def main() -> int:
         help="send thinking=disabled (z.ai/GLM reasoning models)",
     )
     parser.add_argument(
+        "--hide-tools", nargs="*", default=None,
+        help="remove tools from the planner catalog (A/B evaluation, "
+        "e.g. --hide-tools get_document_structure)",
+    )
+    parser.add_argument(
         "--shard", default=None,
         help="run a slice of the cases, e.g. 1/4 (round-robin by index)",
     )
@@ -458,6 +466,7 @@ def main() -> int:
         "max_output_tokens": args.max_output_tokens,
         "timeout_seconds": args.timeout_seconds,
         "disable_thinking": args.disable_thinking,
+        "hidden_tools": args.hide_tools,
     }
     shard: tuple[int, int] | None = None
     if args.shard:

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from ..canonical import ResolutionStatus
 from .normalization import normalize_legal_text, normalize_number
 
-_ARTICLE_REFERENCE = re.compile(r"ماده\s+(?P<number>[0-9]+)")
+_ARTICLE_REFERENCE = re.compile(r"ماده[\s\u200c]*[\(]?\s*(?P<number>[0-9]+)(?:\s*[\)])?")
 _LOCAL_SCOPE = re.compile(r"^\s+این\s+(?:قانون|آیین[‌-]?نامه|دستورالعمل|بخشنامه|مصوبه)")
 
 
@@ -59,11 +59,20 @@ class DeterministicReferenceExtractor:
                 status = ResolutionStatus.UNRESOLVED
                 confidence = 0.85
             end = match.end() + explicit_scope_end
+            head_len = match.end() - match.start()
+            head = " ".join(
+                normalized[match.start() : match.end()]
+                .replace("(", " ")
+                .replace(")", " ")
+                .split()
+            )
+            tail = normalized[match.end() : end].strip()
+            target_text = f"{head} {tail}".strip() if tail else head
             mentions.append(
                 ReferenceMention(
                     start=match.start(),
                     end=end,
-                    target_text=normalized[match.start() : end],
+                    target_text=target_text,
                     number=number,
                     resolution_status=status,
                     resolved_target_provision_id=resolved,

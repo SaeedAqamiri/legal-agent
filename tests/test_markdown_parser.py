@@ -48,13 +48,65 @@ class MarkdownParserTests(unittest.TestCase):
         self.assertEqual(parsed.source.media_type, "text/markdown")
         self.assertTrue(parsed.source.checksum.startswith("sha256:"))
         self.assertEqual(parsed.version.version_label, "v1")
-        self.assertGreaterEqual(len(parsed.provisions), 3)
+        # forest roots: ماده 1 (with تبصره 1 nested) and بخش ۲
+        self.assertEqual(len(parsed.provisions), 2)
         by_label = {item.label: item for item in parsed.provisions}
         self.assertEqual(by_label["ماده 1"].provision_type, ProvisionType.ARTICLE)
-        self.assertEqual(by_label["تبصره 1"].provision_type, ProvisionType.NOTE)
         self.assertEqual(by_label["بخش ۲"].provision_type, ProvisionType.PART)
         self.assertEqual(by_label["ماده 1"].page_number, 1)
         self.assertEqual(by_label["بخش ۲"].page_number, 2)
+        # DFS ordinals keep document order
+        self.assertEqual(
+            [item.ordinal for item in parsed.provisions], [0, 2]
+        )
+        note = by_label["ماده 1"].children[0]
+        self.assertEqual(note.label, "تبصره 1")
+        self.assertEqual(note.provision_type, ProvisionType.NOTE)
+        self.assertEqual(note.ordinal, 1)
+
+    def test_nesting_under_chapters_and_articles(self) -> None:
+        content = (
+            "# قانون نمونه\n"
+            "## صفحه 1\n"
+            "بخش ۱: سازماندهی\n"
+            "فصل اول: کلیات\n"
+            "ماده 1 تعاریف عمومی است.\n"
+            "تبصره 1 توضیح ماده یک.\n"
+            "فصل دوم: نحوه اجرا\n"
+            "ماده 2 شرایط عمومی است.\n"
+            "بند 1 جزئیات ماده دو.\n"
+            "ماده 3 مراجع ذی‌صلاح.\n"
+        )
+        parsed = parse_markdown_document(content, filename="nested.md")
+        roots = {item.label: item for item in parsed.provisions}
+        self.assertEqual(sorted(roots), ["بخش ۱"])
+        # فصل‌ها nest inside بخش, مواد inside فصل, تبصره/بند under ماده
+        part = roots["بخش ۱"]
+        self.assertEqual(
+            [child.label for child in part.children], ["فصل اول", "فصل دوم"]
+        )
+        chapter_one = part.children[0]
+        article_one = chapter_one.children[0]
+        self.assertEqual(article_one.label, "ماده 1")
+        self.assertEqual(article_one.children[0].label, "تبصره 1")
+        chapter_two = part.children[1]
+        self.assertEqual(
+            [child.label for child in chapter_two.children], ["ماده 2", "ماده 3"]
+        )
+        self.assertEqual(chapter_two.children[0].children[0].label, "بند 1")
+        # DFS order equals document order
+        flat = []
+
+        def walk(items):
+            for item in items:
+                flat.append(item.label)
+                walk(item.children)
+
+        walk(parsed.provisions)
+        self.assertEqual(
+            flat,
+            ["بخش ۱", "فصل اول", "ماده 1", "تبصره 1", "فصل دوم", "ماده 2", "بند 1", "ماده 3"],
+        )
 
     def test_page_segments_split_multi_page_provisions(self) -> None:
         content = (

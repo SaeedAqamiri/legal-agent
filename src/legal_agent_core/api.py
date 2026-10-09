@@ -206,6 +206,10 @@ def create_app(container: APIContainer) -> FastAPI:
         request: Request,
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
     ) -> Principal:
+        if container.default_principal is not None:
+            # Single-user mode: authentication is disabled and every request
+            # is attributed to the default local principal.
+            return container.default_principal
         if credentials is not None and credentials.scheme.lower() == "bearer":
             return container.token_verifier.verify(credentials.credentials)
         if container.oidc is not None:
@@ -663,6 +667,30 @@ def create_app(container: APIContainer) -> FastAPI:
                     (node_ids, node_ids),
                 )
                 edge_rows = cur.fetchall()
+                if not center:
+                    # Overview mode: map relation endpoints to their owning
+                    # instrument (edges may connect provisions, instruments,
+                    # or a provision to an instrument) and aggregate them so
+                    # the graph shows instrument-level edges.
+                    cur.execute(
+                        """SELECT 'edge:agg:' || md5(
+                                   COALESCE(sp.instrument_id, e.source_node_id)
+                                   || COALESCE(tp.instrument_id, e.target_node_id)
+                                   || e.edge_type),
+                                  COALESCE(sp.instrument_id, e.source_node_id),
+                                  COALESCE(tp.instrument_id, e.target_node_id),
+                                  e.edge_type, count(*)
+                           FROM canonical.graph_edges e
+                           LEFT JOIN canonical.provisions sp ON sp.provision_id = e.source_node_id
+                           LEFT JOIN canonical.provisions tp ON tp.provision_id = e.target_node_id
+                           WHERE COALESCE(sp.instrument_id, e.source_node_id) = ANY(%s)
+                             AND COALESCE(tp.instrument_id, e.target_node_id) = ANY(%s)
+                             AND COALESCE(sp.instrument_id, e.source_node_id)
+                                 <> COALESCE(tp.instrument_id, e.target_node_id)
+                           GROUP BY 2, 3, 4""",
+                        (node_ids, node_ids),
+                    )
+                    edge_rows.extend(cur.fetchall())
             else:
                 edge_rows = []
             cur.execute("SELECT count(*) FROM canonical.graph_edges")
@@ -682,11 +710,12 @@ def create_app(container: APIContainer) -> FastAPI:
         }
         edges = [
             {
-                "id": row[0],
+                "id": str(row[0]),
                 "source": row[1],
                 "target": row[2],
                 "kind": row[3],
                 "status": "approved",
+                **({"weight": int(row[4])} if len(row) > 4 else {}),
             }
             for row in edge_rows
         ]

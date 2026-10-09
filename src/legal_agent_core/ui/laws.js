@@ -124,6 +124,7 @@ function setTab(activeId) {
   byId("tab-pdf").classList.toggle("active", activeId === "tab-pdf");
 }
 
+byId("doc-close").onclick = () => byId("doc").close();
 byId("tab-text").onclick = () => (currentDoc ? showText() : null);
 byId("tab-pdf").onclick = () => (currentDoc && currentDoc.format === "pdf" ? showPdf() : null);
 

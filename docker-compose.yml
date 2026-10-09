@@ -1,6 +1,7 @@
 services:
   db:
     image: postgres:18
+    restart: unless-stopped
     environment:
       POSTGRES_USER: legal_agent
       POSTGRES_PASSWORD: legal_agent
@@ -8,7 +9,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U legal_agent -d legal_agent"]
       interval: 5s
@@ -16,7 +17,8 @@ services:
       retries: 20
 
   falkordb:
-    image: falkordb/falkordb:4.20.3
+    image: falkordb/falkordb:v4.20.7
+    restart: unless-stopped
     ports:
       - "6379:6379"
     volumes:
@@ -33,6 +35,9 @@ services:
       LEGAL_AGENT_POSTGRES_DSN: postgresql://legal_agent:legal_agent@db:5432/legal_agent
       FALKORDB_URL: falkor://falkordb:6379
       LEGAL_AGENT_SESSION_SECRET: ${LEGAL_AGENT_SESSION_SECRET:-dev-secret-change-me}
+    volumes:
+      # law corpus (PDFs + markdown) referenced by absolute paths in the DB
+      - /home/saeed/laws-mcp/data:/home/saeed/laws-mcp/data:ro
     depends_on:
       db:
         condition: service_healthy
