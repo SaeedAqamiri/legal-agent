@@ -16,6 +16,91 @@ const EFFECT_LABELS = {
 const byId = (id) => document.getElementById(id);
 const setStatus = (text) => { byId("status").textContent = text; };
 
+/* Payload cache (IndexedDB) + layout cache (localStorage) so revisits paint
+   instantly instead of refetching 4.5MB and re-running physics from scratch. */
+const CACHE_DB = "legal-agent-graph";
+const CACHE_STORE = "payloads";
+const CACHE_TTL_MS = 10 * 60 * 1000;
+const overviewKey = () => `overview:${state.org}:2000`;
+const centerKey = (id) => `center:${state.org}:${id}`;
+const posKey = () => `graph-pos:${state.org}`;
+
+function cacheOpen() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(CACHE_DB, 1);
+    request.onupgradeneeded = () => request.result.createObjectStore(CACHE_STORE);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function cacheGet(key) {
+  try {
+    const db = await cacheOpen();
+    return await new Promise((resolve, reject) => {
+      const request = db.transaction(CACHE_STORE, "readonly").objectStore(CACHE_STORE).get(key);
+      request.onsuccess = () => resolve(request.result || null);
+      request.onerror = () => reject(request.error);
+    });
+  } catch { return null; }
+}
+
+async function cachePut(key, value) {
+  try {
+    const db = await cacheOpen();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(CACHE_STORE, "readwrite");
+      tx.objectStore(CACHE_STORE).put(value, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch { /* cache is best-effort */ }
+}
+
+async function cacheDeletePrefix(prefix) {
+  try {
+    const db = await cacheOpen();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(CACHE_STORE, "readwrite");
+      const request = tx.objectStore(CACHE_STORE).openCursor();
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) return;
+        if (String(cursor.key).startsWith(prefix)) cursor.delete();
+        cursor.continue();
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch { /* cache is best-effort */ }
+}
+
+function fingerprint(payload) {
+  const pending = payload.edges.filter((edge) => edge.status === "candidate").length;
+  return [payload.counts.nodes, payload.counts.edges, pending, payload.totals?.edges ?? -1, payload.totals?.provisions ?? -1].join(":");
+}
+
+function loadPositions() {
+  try { return JSON.parse(localStorage.getItem(posKey()) || "{}"); } catch { return {}; }
+}
+
+function savePositions(network) {
+  try { localStorage.setItem(posKey(), JSON.stringify(network.getPositions())); } catch { /* quota — best-effort */ }
+}
+
+let positionSaveTimer = null;
+function queuePositionSave() {
+  if (positionSaveTimer || !state.network) return;
+  positionSaveTimer = setTimeout(() => {
+    positionSaveTimer = null;
+    if (state.network) savePositions(state.network);
+  }, 2000);
+}
+
+async function fetchGraph(queryString) {
+  return api(`/v1/organizations/${state.org}/graph?${queryString}`);
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers: { "Content-Type": "application/json", ...(options.headers || {}) } });
   if (!response.ok) throw new Error(`${response.status}: ${(await response.text()).slice(0, 160)}`);
@@ -72,21 +157,30 @@ function render(payload) {
   state.allPayload = payload;
   state.nodes = payload.nodes;
   state.edges = payload.edges;
+  const positions = loadPositions();
   const data = toVis(payload);
+  let positioned = 0;
+  for (const node of data.nodes) {
+    const saved = positions[node.id];
+    if (saved) { node.x = saved.x; node.y = saved.y; positioned += 1; }
+  }
+  const reuseLayout = positioned >= data.nodes.length * 0.9;
   const options = {
     autoResize: true,
-    physics: { solver: "barnesHut", barnesHut: { gravitationalConstant: -8000, springLength: 120, avoidOverlap: 0.3 }, stabilization: { iterations: 250, fit: true } },
+    physics: { solver: "barnesHut", barnesHut: { gravitationalConstant: -8000, springLength: 120, avoidOverlap: 0.3 }, stabilization: { enabled: !reuseLayout, iterations: 250, fit: true } },
     interaction: { hover: true, tooltipDelay: 140, navigationButtons: false, hideEdgesOnDrag: true },
     edges: { selectionWidth: 2 },
   };
   if (!state.network) {
     state.network = new vis.Network(byId("graph"), data, options);
+    if (reuseLayout) state.network.once("afterDrawing", () => state.network.fit());
     state.network.on("click", (params) => {
       if (params.nodes.length) showPanel(params.nodes[0]);
       else closePanel();
     });
     state.network.on("stabilizationProgress", (p) => setStatus(`چیدمان… ${Math.round(p.iterations / p.total * 100)}%`));
-    state.network.on("stabilizationIterationsDone", () => setStatus("آماده"));
+    state.network.on("stabilizationIterationsDone", () => { savePositions(state.network); setStatus("آماده"); });
+    state.network.on("afterDrawing", queuePositionSave);
   } else {
     state.network.setData(data);
   }
@@ -121,17 +215,37 @@ function render(payload) {
 }
 
 async function centerOn(instrumentId) {
-  setStatus("در حال بازکردن تار ارجاعات…");
+  const key = centerKey(instrumentId);
+  const cached = await cacheGet(key);
+  if (cached) render(cached.payload);
+  if (cached && Date.now() - cached.at < CACHE_TTL_MS) { setStatus("آماده (کش)"); return; }
+  setStatus(cached ? "به‌روزرسانی…" : "در حال بازکردن تار ارجاعات…");
   try {
-    render(await api(`/v1/organizations/${state.org}/graph?limit=2000&center=${encodeURIComponent(instrumentId)}`));
-  } catch (error) { setStatus("خطا: " + error.message); }
+    const payload = await fetchGraph(`limit=2000&center=${encodeURIComponent(instrumentId)}`);
+    await cachePut(key, { at: Date.now(), payload });
+    if (!cached || fingerprint(payload) !== fingerprint(cached.payload)) render(payload);
+    else setStatus("آماده");
+  } catch (error) {
+    if (!cached) setStatus("خطا: " + error.message);
+    else setStatus("آماده (کش)");
+  }
 }
 
 async function loadOverview() {
-  setStatus("در حال دریافت کل گراف…");
+  const key = overviewKey();
+  const cached = await cacheGet(key);
+  if (cached) render(cached.payload);
+  if (cached && Date.now() - cached.at < CACHE_TTL_MS) { setStatus("آماده (کش)"); return; }
+  setStatus(cached ? "به‌روزرسانی…" : "در حال دریافت کل گراف…");
   try {
-    render(await api(`/v1/organizations/${state.org}/graph?limit=2000`));
-  } catch (error) { setStatus("خطا: " + error.message); }
+    const payload = await fetchGraph("limit=2000");
+    await cachePut(key, { at: Date.now(), payload });
+    if (!cached || fingerprint(payload) !== fingerprint(cached.payload)) render(payload);
+    else setStatus("آماده");
+  } catch (error) {
+    if (!cached) setStatus("خطا: " + error.message);
+    else setStatus("آماده (کش)");
+  }
 }
 
 function applyFilter(term) {
@@ -200,12 +314,19 @@ async function reviewEffect(effectUid, action) {
       method: "POST", body: JSON.stringify({ action }),
     });
     setStatus(action === "approve" ? `یال منتشر شد (${result.published_edge})` : "رد شد");
+    await cacheDeletePrefix("overview:");
+    await cacheDeletePrefix("center:");
     await loadOverview();
   } catch (error) { setStatus("خطا: " + error.message); }
 }
 
 byId("search") && null;
-byId("q").addEventListener("input", (event) => applyFilter(event.target.value.trim()));
+let filterTimer = null;
+byId("q").addEventListener("input", (event) => {
+  clearTimeout(filterTimer);
+  const term = event.target.value.trim();
+  filterTimer = setTimeout(() => applyFilter(term), 200);
+});
 byId("zoom-in").onclick = () => state.network.moveTo({ scale: state.network.getScale() * 1.25 });
 byId("zoom-out").onclick = () => state.network.moveTo({ scale: state.network.getScale() / 1.25 });
 byId("zoom-fit").onclick = () => state.network.fit({ animation: true });
