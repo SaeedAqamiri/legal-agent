@@ -337,3 +337,16 @@ dialog input:focus { border-color: #6e988b; box-shadow: 0 0 0 3px rgba(36,92,80,
 .live-step-body { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
 .live-step-body strong { color: #173f38; }
 .live-step-body span { color: #6b7772; }
+
+/* --- LLM gateway settings panel ------------------------------------- */
+.settings-form { max-width: 760px; }
+.settings-grid { display: grid; gap: 14px; }
+.settings-grid label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 12px; font-weight: 700; }
+.settings-hint { color: var(--muted); font-weight: 400; }
+.settings-grid input { width: 100%; padding: 10px 12px; color: var(--ink); border: 1px solid var(--line);
+  border-radius: 8px; outline: 0; background: var(--surface); }
+.settings-grid input:focus { border-color: var(--green-2); box-shadow: 0 0 0 3px rgba(36,92,80,.12); }
+.settings-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 20px; flex-wrap: wrap; }
+.settings-status { color: var(--muted); font-size: 12px; }
+.settings-status.is-error { color: var(--danger); }
+.settings-actions { display: flex; gap: 8px; }

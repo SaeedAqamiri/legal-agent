@@ -119,6 +119,7 @@ class CanonicalEdgeType(StrEnum):
     INTERPRETS = "interprets"
     ANNULS = "annuls"
     CONFLICTS_WITH = "conflicts_with"
+    SUBORDINATE_TO = "subordinate_to"
 
 
 @dataclass(frozen=True, slots=True)

@@ -72,7 +72,9 @@ class CanonicalIngestionPipeline:
         instrument = LegalInstrument(
             instrument_id=instrument_id,
             title=parsed.instrument.title,
-            canonical_title=parsed.instrument.canonical_title,
+            # canonical_title is the normalized identity (never the raw title):
+            # it must equal sources.instruments.canonical_key for cross-schema joins.
+            canonical_title=normalize_legal_text(parsed.instrument.canonical_title),
             instrument_type=parsed.instrument.instrument_type,
             jurisdiction=parsed.instrument.jurisdiction,
             issuer=parsed.instrument.issuer,

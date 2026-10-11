@@ -69,7 +69,7 @@ CAT_CONFIG = {
     "نشست‌های قضایی": ("guideline", None, InstrumentType.GUIDELINE, "single"),
     "نظریه‌های مشورتی": ("advisory_opinion", None, InstrumentType.ADVISORY_OPINION, "single"),
     "نظریه‌های رئیس مجلس": ("advisory_opinion", None, InstrumentType.ADVISORY_OPINION, "single"),
-    "سیاست‌های کلی": ("policy", 1, InstrumentType.POLICY, "parse"),
+    "سیاست‌های کلی": ("policy", 2, InstrumentType.POLICY, "parse"),
     "آیین‌نامه‌ها": ("regulation", 4, InstrumentType.REGULATION, "parse"),
     "مصوبات": ("cabinet_approval", 4, InstrumentType.RESOLUTION, "parse"),
     "بخشنامه‌ها": ("circular", 5, InstrumentType.CIRCULAR, "parse"),
@@ -306,8 +306,10 @@ def register_source_document(
                instrument_uid = EXCLUDED.instrument_uid,
                last_seen_at = now()""",
         (
+            # no original PDF for the cats corpus: the markdown IS the text,
+            # so leave original_path NULL (else it is served as a PDF).
             SOURCE_ID, external_id, instrument_uid, doc_kind, tier,
-            title, issue_date, str(md_path), checksum, str(md_path), checksum,
+            title, issue_date, None, None, str(md_path), checksum,
             url, json.dumps(metadata, ensure_ascii=False),
         ),
     )

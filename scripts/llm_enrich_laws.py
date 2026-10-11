@@ -394,11 +394,29 @@ def main() -> int:
             _uid, ext, title = item
             md_path = args.data_dir / "laws" / f"{ext.split('#')[0]}.md"
             if not md_path.exists():
-                return item, None
+                return item, None, None
             text = md_path.read_text(encoding="utf-8", errors="replace")
-            payload = chat.json_call(amend_prompt(title, text), SYSTEM_ENRICHER)
+            # chunk long docs so amendments deep in the text are not missed
+            chunk_size, overlap, max_chunks = 9000, 600, 5
+            targets: list[dict] = []
+            seen_quotes = set()
+            spans = [
+                text[start : start + chunk_size]
+                for start in range(0, min(len(text), chunk_size * max_chunks), chunk_size - overlap)
+            ]
+            if len(text) > chunk_size * max_chunks:
+                spans.append(text[-chunk_size:])
+            for span in spans:
+                payload = chat.json_call(amend_prompt(title, span), SYSTEM_ENRICHER)
+                for target in payload.get("targets", []) if isinstance(payload, dict) else []:
+                    quote = str(target.get("quote", "")).strip()
+                    key = quote[:120]
+                    if quote and key in seen_quotes:
+                        continue
+                    seen_quotes.add(key)
+                    targets.append(target)
             input_checksum = hashlib.sha1(text[:9000].encode()).hexdigest()
-            return item, payload, input_checksum
+            return item, {"targets": targets}, input_checksum
 
         results, errors = [], []
         with ThreadPoolExecutor(max_workers=chat.workers) as pool:

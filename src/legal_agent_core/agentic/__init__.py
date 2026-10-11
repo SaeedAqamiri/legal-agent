@@ -13,6 +13,13 @@ from .envelope import (
     empty_envelope,
     make_envelope,
 )
+from .graph_chat import (
+    GraphChatConfig,
+    GraphChatLoop,
+    GraphChatResult,
+    GraphChatService,
+)
+from .graph_tools import GRAPH_TOOL_SPECS, GraphTools
 from .loop import (
     AgenticConfig,
     IncompleteReason,
@@ -24,9 +31,15 @@ from .skill_router import all_skills, select_skill
 from .tools import LegalResearchTools, ToolResult
 
 __all__ = [
+    "GRAPH_TOOL_SPECS",
     "ITEMS_IN_CONTEXT",
     "AgenticConfig",
     "Envelope",
+    "GraphChatConfig",
+    "GraphChatLoop",
+    "GraphChatResult",
+    "GraphChatService",
+    "GraphTools",
     "IncompleteReason",
     "LLMToolPlanner",
     "LegalResearchTools",

@@ -53,6 +53,7 @@ EFFECT_EDGE = {
     "restore": "restores",
     "interpret": "interprets",
     "conflict": "conflicts_with",
+    "implement": "implements",
 }
 
 
@@ -116,9 +117,9 @@ def publish_effects(db: psycopg.Connection, min_confidence: float) -> dict:
                JOIN sources.source_documents sd ON sd.document_uid = e.affecting_document_uid
                JOIN sources.instruments si ON si.instrument_uid = sd.instrument_uid
                LEFT JOIN sources.instruments di ON di.instrument_uid = e.affected_instrument_uid
-               JOIN canonical.legal_instruments ci ON ci.canonical_title = si.canonical_title
-               LEFT JOIN canonical.legal_instruments ci2 ON ci2.canonical_title = di.canonical_title
-               WHERE e.review_status = 'candidate'"""
+               JOIN canonical.legal_instruments ci ON ci.canonical_title = si.canonical_key
+               LEFT JOIN canonical.legal_instruments ci2 ON ci2.canonical_title = di.canonical_key
+               WHERE e.review_status IN ('candidate', 'approved')"""
         )
         rows = cur.fetchall()
     for effect_uid, effect_type, confidence, source_id, target_id in rows:

@@ -75,7 +75,7 @@ async function request(path, options = {}) {
 function selectPanel(panelId) {
   document.querySelectorAll(".panel").forEach((panel) => panel.classList.toggle("is-active", panel.id === panelId));
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("is-active", item.dataset.panel === panelId));
-  const titles = { "research-panel": "پژوهش جدید", "library-panel": "کتابخانه اسناد", "history-panel": "تاریخچه پژوهش", "graph-panel": "دانش تدریجی", "trace-panel": "مسیر استدلال", "review-panel": "صف بازبینی" };
+  const titles = { "research-panel": "پژوهش جدید", "library-panel": "کتابخانه اسناد", "history-panel": "تاریخچه پژوهش", "graph-panel": "دانش تدریجی", "trace-panel": "مسیر استدلال", "review-panel": "صف بازبینی", "settings-panel": "تنظیمات" };
   byId("page-title").textContent = titles[panelId];
 }
 
@@ -640,11 +640,86 @@ function connectSession() {
   }
 }
 
+function renderLLMSettings(data) {
+  byId("llm-base-url").value = data.base_url || "";
+  byId("llm-model").value = data.model || "";
+  byId("llm-api-key").value = "";
+  byId("llm-key-state").textContent = data.api_key_set
+    ? `ذخیره‌شده (${data.api_key_hint})`
+    : "ذخیره نشده";
+  const status = byId("llm-settings-status");
+  status.classList.remove("is-error");
+  status.textContent = data.configured
+    ? "پیکربندی فعال است."
+    : "برای فعال‌سازی، کلید API را وارد و ذخیره کنید.";
+}
+
+async function loadLLMSettings() {
+  const status = byId("llm-settings-status");
+  status.classList.remove("is-error");
+  status.textContent = "در حال بارگذاری…";
+  try {
+    renderLLMSettings(await request("/v1/settings/llm"));
+  } catch (error) {
+    status.textContent = `خطا: ${error.message}`;
+    status.classList.add("is-error");
+  }
+}
+
+async function saveLLMSettings(event) {
+  event.preventDefault();
+  const button = byId("llm-save-button");
+  const status = byId("llm-settings-status");
+  button.disabled = true;
+  status.classList.remove("is-error");
+  status.textContent = "در حال ذخیره…";
+  try {
+    const payload = {
+      base_url: byId("llm-base-url").value.trim(),
+      model: byId("llm-model").value.trim(),
+    };
+    const key = byId("llm-api-key").value.trim();
+    if (key) payload.api_key = key;
+    renderLLMSettings(
+      await request("/v1/settings/llm", { method: "PUT", body: JSON.stringify(payload) })
+    );
+    status.textContent = "ذخیره شد؛ پنل «راهنمای کاوش گراف» اکنون فعال است.";
+    toast("تنظیمات مدل زبانی ذخیره شد.");
+  } catch (error) {
+    status.textContent = `خطا: ${error.message}`;
+    status.classList.add("is-error");
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function testLLMSettings() {
+  const button = byId("llm-test-button");
+  const status = byId("llm-settings-status");
+  button.disabled = true;
+  status.classList.remove("is-error");
+  status.textContent = "در حال تست اتصال…";
+  try {
+    const data = await request("/v1/settings/llm/test", { method: "POST" });
+    status.textContent = data.ok
+      ? `اتصال موفق — ${data.model} · ${faNumber.format(data.latency_ms)} میلی‌ثانیه`
+      : `اتصال ناموفق: ${data.error}`;
+    status.classList.toggle("is-error", !data.ok);
+  } catch (error) {
+    status.textContent = `خطا: ${error.message}`;
+    status.classList.add("is-error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
 const panelLoaders = {
   "library-panel": loadLibrary,
   "review-panel": loadReviewQueue,
   "history-panel": loadHistory,
   "graph-panel": loadResearchGraph,
+  "settings-panel": loadLLMSettings,
 };
 
 document.querySelectorAll(".nav-item").forEach((item) => {
@@ -674,6 +749,8 @@ byId("refresh-review").addEventListener("click", loadReviewQueue);
 byId("refresh-history").addEventListener("click", loadHistory);
 byId("refresh-graph").addEventListener("click", loadResearchGraph);
 byId("review-form").addEventListener("submit", submitReview);
+byId("llm-settings-form").addEventListener("submit", saveLLMSettings);
+byId("llm-test-button").addEventListener("click", testLLMSettings);
 byId("applicable-time").value = new Date().toISOString().slice(0, 10);
 byId("library-date").value = byId("applicable-time").value;
 byId("applicable-time").value = new Date().toISOString().slice(0, 10);

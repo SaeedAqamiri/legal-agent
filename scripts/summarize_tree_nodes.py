@@ -24,19 +24,21 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import psycopg
 
-BASE_URL = "https://api.z.ai/api/coding/paas/v4"
-MODEL = "glm-5.3-flash"
+BASE_URL = os.environ.get("LEGAL_AGENT_LLM_BASE_URL", "https://llm.armantechhub.ir/v1")
+MODEL = os.environ.get("LEGAL_AGENT_LLM_MODEL", "deepseek-v4.1-flash")
 STAGE = "structure"
-PROMPT_VERSION = "tree-v1"
+PROMPT_VERSION = "tree-v1-avalai"
 MAX_TOKENS = 8000
 #: containers longer than this many children are split across calls
 MAX_NODES_PER_CALL = 60
+API_TXT = Path("~/api.txt").expanduser()
 
 JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(.+?)```", re.DOTALL)
 
@@ -54,6 +56,19 @@ def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def api_key() -> str:
+    key = os.environ.get("LEGAL_AGENT_LLM_API_KEY")
+    if key:
+        return key.strip()
+    text = API_TXT.read_text(encoding="utf-8", errors="replace")
+    block = re.search(r'"arman"\s*:\s*\{(.*?)\n\s*\}', text, re.DOTALL)
+    scoped = block.group(1) if block else text
+    match = re.search(r'"apiKey"\s*:\s*"([^"]+)"', scoped)
+    if not match:
+        raise SystemExit("no LEGAL_AGENT_LLM_API_KEY and no arman apiKey in ~/api.txt")
+    return match.group(1).strip()
+
+
 def extract_json(text: str):
     fenced = JSON_BLOCK_RE.search(text)
     candidate = fenced.group(1) if fenced else text
@@ -68,7 +83,6 @@ def llm_json(key: str, prompt: str, retries: int = 6) -> dict:
         "model": MODEL,
         "temperature": 0.1,
         "max_tokens": MAX_TOKENS,
-        "thinking": {"type": "disabled"},
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
@@ -161,11 +175,9 @@ def main() -> int:
     parser.add_argument(
         "--force", action="store_true", help="resummarize instruments that already have summaries"
     )
+    parser.add_argument("--workers", type=int, default=10, help="parallel LLM calls")
     args = parser.parse_args()
-    key = os.environ.get("LEGAL_AGENT_LLM_API_KEY")
-    if not key:
-        print("LEGAL_AGENT_LLM_API_KEY is not set", file=sys.stderr)
-        return 1
+    key = api_key()
 
     with psycopg.connect(args.dsn, autocommit=True) as db:
         condition = "AND i.instrument_id = %s" if args.instrument else ""
@@ -195,39 +207,62 @@ def main() -> int:
             todo = todo[: args.max_instruments]
         log(f"{len(todo)} instruments to summarize ({len(done)} already done)")
 
-        for index, (instrument_id, title) in enumerate(todo, 1):
+        tasks = []
+        for instrument_id, title in todo:
             nodes = container_nodes(db, instrument_id)
             if not nodes:
                 continue
+            batches = [
+                build_prompt(title, nodes[start : start + MAX_NODES_PER_CALL])
+                for start in range(0, len(nodes), MAX_NODES_PER_CALL)
+            ]
+            batch_nodes = [
+                nodes[start : start + MAX_NODES_PER_CALL]
+                for start in range(0, len(nodes), MAX_NODES_PER_CALL)
+            ]
+            tasks.append((instrument_id, title, batches, batch_nodes))
+        log(f"tasks: {len(tasks)} instruments, {sum(len(t[2]) for t in tasks)} LLM calls, workers={args.workers}")
+
+        def run_task(task):
+            instrument_id, title, batches, batch_nodes = task
             summaries: dict[str, str] = {}
-            try:
-                for start in range(0, len(nodes), MAX_NODES_PER_CALL):
-                    batch = nodes[start : start + MAX_NODES_PER_CALL]
-                    payload = llm_json(key, build_prompt(title, batch))
-                    for node in batch:
-                        text = (payload.get("summaries") or {}).get(node["provision_id"])
-                        if isinstance(text, str) and text.strip():
-                            summaries[node["provision_id"]] = text.strip()[:400]
-            except Exception as exc:  # noqa: BLE001
-                log(f"{instrument_id} FAILED: {exc}")
-                continue
-            if not summaries:
-                continue
-            for provision_id, text in summaries.items():
-                db.execute(
-                    """INSERT INTO canonical.provision_summaries
-                           (provision_id, instrument_id, summary, model, prompt_version)
-                       VALUES (%s, %s, %s, %s, %s)
-                       ON CONFLICT (provision_id) DO UPDATE
-                       SET summary = EXCLUDED.summary,
-                           model = EXCLUDED.model,
-                           prompt_version = EXCLUDED.prompt_version,
-                           created_at = now()""",
-                    (provision_id, instrument_id, text, MODEL, PROMPT_VERSION),
-                )
-            if index % 25 == 0:
-                log(f"{index}/{len(todo)} done (last: {title[:50]})")
-        log("finished")
+            for prompt, nodes in zip(batches, batch_nodes):
+                payload = llm_json(key, prompt)
+                for node in nodes:
+                    text = (payload.get("summaries") or {}).get(node["provision_id"])
+                    if isinstance(text, str) and text.strip():
+                        summaries[node["provision_id"]] = text.strip()[:400]
+            return instrument_id, title, summaries
+
+        done_count = failed = 0
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            futures = {pool.submit(run_task, task): task for task in tasks}
+            for future in as_completed(futures):
+                instrument_id, title = futures[future][0], futures[future][1]
+                try:
+                    instrument_id, title, summaries = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    failed += 1
+                    log(f"{instrument_id} FAILED: {str(exc)[:120]}")
+                    continue
+                if not summaries:
+                    continue
+                for provision_id, text in summaries.items():
+                    db.execute(
+                        """INSERT INTO canonical.provision_summaries
+                               (provision_id, instrument_id, summary, model, prompt_version)
+                           VALUES (%s, %s, %s, %s, %s)
+                           ON CONFLICT (provision_id) DO UPDATE
+                           SET summary = EXCLUDED.summary,
+                               model = EXCLUDED.model,
+                               prompt_version = EXCLUDED.prompt_version,
+                               created_at = now()""",
+                        (provision_id, instrument_id, text, MODEL, PROMPT_VERSION),
+                    )
+                done_count += 1
+                if done_count % 25 == 0:
+                    log(f"{done_count}/{len(tasks)} done (last: {title[:50]})")
+        log(f"finished: {done_count} instruments summarized, {failed} failed")
     return 0
 
 

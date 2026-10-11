@@ -358,6 +358,20 @@ def _agentic_extras(settings: Settings, canonical: Any) -> dict[str, Any]:
     return extras
 
 
+def _graph_chat_provider(settings: Settings, laws_graph: Any, canonical: Any = None) -> Any:
+    """Runtime-configurable graph-guide chat agent over the laws projection.
+
+    Always returns a provider so the workspace settings panel can configure the
+    LLM gateway at runtime; the provider reports ``available=False`` until an
+    API key is saved (or found in the environment).
+    """
+    from .graph_chat_provider import GraphChatProvider
+    from .runtime_settings import LLMSettingsStore, default_settings_path
+
+    store = LLMSettingsStore(default_settings_path())
+    return GraphChatProvider(laws_graph, canonical, store)
+
+
 def create_app_from_env(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     canonical = _canonical_repository(settings)
@@ -366,6 +380,7 @@ def create_app_from_env(settings: Settings | None = None) -> FastAPI:
     authorization = AuthorizationService()
     metrics = MetricsRegistry()
     identifiers = count(1)
+    start_laws_mirror_sync(settings)
 
     research = ResearchApplicationService(
         NavigationLoop(
@@ -437,6 +452,17 @@ def create_app_from_env(settings: Settings | None = None) -> FastAPI:
         }),
     )
 
+    laws_graph = None
+    if settings.falkor.enabled:
+        from .adapters.falkordb import connect_laws_graph
+
+        try:
+            laws_graph = connect_laws_graph(settings.falkor.url)
+        except Exception:  # noqa: BLE001 — projection is optional at boot
+            laws_graph = None
+
+    graph_chat = _graph_chat_provider(settings, laws_graph, canonical)
+
     return create_app(
         APIContainer(
             research,
@@ -449,6 +475,9 @@ def create_app_from_env(settings: Settings | None = None) -> FastAPI:
             history=history,
             oidc=oidc,
             default_principal=default_principal,
+            laws_graph=laws_graph,
+            graph_chat=graph_chat,
+            llm_settings=graph_chat,
         )
     )
 
@@ -488,6 +517,36 @@ def _session_secret(settings: Settings) -> str:
     from .settings import _env
 
     return _env("LEGAL_AGENT_SESSION_SECRET", "dev-session-secret-change-me") or ""
+
+
+def start_laws_mirror_sync(settings: Settings) -> None:
+    """Rebuild the FalkorDB laws projection in a background thread at boot.
+
+    Postgres stays the source of truth; the mirror only serves Cypher queries
+    (read-only endpoint + console), so a failed sync degrades gracefully.
+    Opens its own Postgres connection: psycopg connections are not thread-safe.
+    """
+    if not settings.falkor.enabled or not settings.postgres.enabled:
+        return
+
+    def _run() -> None:
+        try:
+            import psycopg
+
+            from .adapters.falkordb import connect_laws_graph
+            from .laws_mirror import sync_laws_mirror
+
+            connection = psycopg.connect(settings.postgres.dsn)
+            graph = connect_laws_graph(settings.falkor.url)
+            sync_laws_mirror(connection, graph)
+        except Exception as exc:  # noqa: BLE001 — mirror is best-effort at boot
+            logging.getLogger(__name__).warning(
+                "laws mirror sync failed: %s: %s", type(exc).__name__, exc
+            )
+
+    import threading
+
+    threading.Thread(target=_run, daemon=True, name="laws-mirror-sync").start()
 
 
 app = create_app_from_env()

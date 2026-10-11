@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>گراف قوانین — عامل پژوهش حقوقی</title>
 <link rel="stylesheet" href="/ui/styles.css">
-<link rel="stylesheet" href="/ui/graph.css?v=3">
+<link rel="stylesheet" href="/ui/graph.css?v=10">
 </head>
 <body>
 <header>
@@ -13,6 +13,7 @@
   <nav>
     <a href="/workspace">میز کار</a>
     <a href="/ui/graph.html" class="active">گراف</a>
+    <a href="/ui/explore.html">کاوش</a>
     <a href="/ui/laws.html">قوانین</a>
   </nav>
   <div class="chips">
@@ -27,12 +28,13 @@
       <input type="search" id="q" placeholder="فیلتر روی گراف… (مثلاً مدنی)">
     </div>
     <div class="block legend">
-      <span><b style="background:#d4af37"></b> اساسی</span>
-      <span><b style="background:#3f8ed6"></b> خاص</span>
-      <span><b style="background:#2f6ea5"></b> عادی</span>
-      <span><b style="background:#5b7d99"></b> مقررات</span>
-      <span><b style="background:#7f97ab"></b> بخشنامه</span>
-      <span><b style="background:#d09b2c; border-radius:2px; height:3px;"></b> در انتظار تأیید</span>
+      <span data-legend="all" title="نمایش همه"><b style="background:#5b7d99"></b> همه</span>
+      <span data-legend="1" title="فیلتر لایه ۱"><b style="background:#3f8ed6"></b> اساسی</span>
+      <span data-legend="2" title="فیلتر لایه ۲"><b style="background:#9a6ac9"></b> خاص</span>
+      <span data-legend="3" title="فیلتر لایه ۳"><b style="background:#d9534f"></b> عادی</span>
+      <span data-legend="4" title="فیلتر لایه ۴"><b style="background:#d98a2b"></b> مقررات</span>
+      <span data-legend="5" title="فیلتر لایه ۵"><b style="background:#3fa66a"></b> بخشنامه</span>
+      <span data-legend="pending" title="فقط یال‌های در انتظار تأیید"><b style="background:#d09b2c; border-radius:2px; height:3px;"></b> در انتظار تأیید</span>
     </div>
     <div class="block stats" id="stats">در حال بارگذاری…</div>
     <div class="panel-body" id="panel">
@@ -45,11 +47,13 @@
       <button id="zoom-in">+</button>
       <button id="zoom-out">−</button>
       <button id="zoom-fit" title="اندازه‌گیری کامل">⤢</button>
+      <button id="toggle-physics" title="توقف/ادامه حرکت گره‌ها">⏸</button>
     </div>
     <div id="status">…</div>
   </div>
 </div>
 <script src="/ui/vendor/vis-network.min.js"></script>
-<script src="/ui/graph.js?v=4"></script>
+<script src="/ui/graph.js?v=14"></script>
+<script src="/ui/chat.js?v=1" defer></script>
 </body>
 </html>

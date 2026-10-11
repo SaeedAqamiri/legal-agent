@@ -55,6 +55,10 @@
             صف بازبینی
             <span class="nav-count" id="review-count">—</span>
           </button>
+          <button class="nav-item" type="button" data-panel="settings-panel">
+            <span class="nav-icon" aria-hidden="true">⚙</span>
+            تنظیمات
+          </button>
         </nav>
 
         <section class="session-card" aria-labelledby="session-title">
@@ -255,6 +259,43 @@
             <div class="review-guidance">این بخش فقط برای نقش «کارشناس حقوقی» یا «متولی دانش» قابل دسترسی است. تأیید شما یک رویداد audit تغییرناپذیر ایجاد می‌کند.</div>
             <div class="empty-state" id="review-empty"><span aria-hidden="true">✓</span><h3>صف هنوز بارگذاری نشده است</h3><p>برای دریافت موارد منتظر بررسی، اتصال امن را تکمیل کنید.</p></div>
             <div class="review-grid is-hidden" id="review-grid"></div>
+          </section>
+
+          <section class="panel" id="settings-panel" aria-labelledby="settings-heading">
+            <div class="panel-heading">
+              <div>
+                <span class="overline">Gateway</span>
+                <h2 id="settings-heading">تنظیمات مدل زبانی</h2>
+                <p>کلید و مدل درگاه LLM برای «راهنمای کاوش گراف». کلید فقط روی سرور ذخیره می‌شود و هرگز کامل نمایش داده نمی‌شود.</p>
+              </div>
+            </div>
+            <form id="llm-settings-form" class="settings-form">
+              <div class="settings-grid">
+                <div>
+                  <label for="llm-base-url">آدرس درگاه (Base URL)</label>
+                  <input id="llm-base-url" dir="ltr" placeholder="https://api.avalai.ir/v1" spellcheck="false">
+                </div>
+                <div>
+                  <label for="llm-model">مدل</label>
+                  <input id="llm-model" dir="ltr" list="llm-model-options" placeholder="deepseek-v4.1-flash" spellcheck="false">
+                  <datalist id="llm-model-options">
+                    <option value="deepseek-v4.1-flash"></option>
+                    <option value="glm-5.3-flash"></option>
+                  </datalist>
+                </div>
+                <div>
+                  <label for="llm-api-key">کلید API <span class="settings-hint" id="llm-key-state"></span></label>
+                  <input id="llm-api-key" type="password" dir="ltr" autocomplete="off" spellcheck="false" placeholder="برای تغییر، کلید جدید را وارد کنید">
+                </div>
+              </div>
+              <div class="settings-footer">
+                <span class="settings-status" id="llm-settings-status">در حال بارگذاری…</span>
+                <div class="settings-actions">
+                  <button type="button" class="secondary-button" id="llm-test-button">تست اتصال</button>
+                  <button type="submit" class="primary-button" id="llm-save-button">ذخیره</button>
+                </div>
+              </div>
+            </form>
           </section>
         </main>
       </div>

@@ -20,7 +20,7 @@ services:
     image: falkordb/falkordb:v4.20.7
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - falkor:/data
     healthcheck:
@@ -30,14 +30,18 @@ services:
       retries: 20
 
   api:
+    # Runs only with: docker compose --profile docker-api up -d api
+    # Day-to-day dev runs natively via scripts/run_api.sh
+    profiles: ["docker-api"]
     build: .
     environment:
       LEGAL_AGENT_POSTGRES_DSN: postgresql://legal_agent:legal_agent@db:5432/legal_agent
       FALKORDB_URL: falkor://falkordb:6379
       LEGAL_AGENT_SESSION_SECRET: ${LEGAL_AGENT_SESSION_SECRET:-dev-secret-change-me}
+      LAWS_DATA_DIR: /home/arman/laws-mcp/data
     volumes:
       # law corpus (PDFs + markdown) referenced by absolute paths in the DB
-      - /home/saeed/laws-mcp/data:/home/saeed/laws-mcp/data:ro
+      - /home/arman/laws-mcp/data:/home/arman/laws-mcp/data:ro
     depends_on:
       db:
         condition: service_healthy

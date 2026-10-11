@@ -1,3 +1,4 @@
+import html
 import json
 import re
 from dataclasses import asdict, dataclass
@@ -19,6 +20,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
+from .adapters.falkordb import LAWS_GRAPH_ID
 from .adapters.oidc import (
     OIDCAuthorizationClient,
     OIDCTokenVerifier,
@@ -106,12 +108,10 @@ def _md_to_html(md_text: str) -> str:
             in_list = False
         if not stripped:
             continue
-        if stripped.startswith("### "):
-            lines_out.append(f"<h3>{esc(stripped[4:])}</h3>")
-        elif stripped.startswith("## "):
-            lines_out.append(f"<h2>{esc(stripped[3:])}</h2>")
-        elif stripped.startswith("# "):
-            lines_out.append(f"<h1>{esc(stripped[2:])}</h1>")
+        heading = re.match(r"^(#{1,})\s+(.+)$", stripped)
+        if heading:
+            level = min(len(heading.group(1)), 6)
+            lines_out.append(f"<h{level}>{esc(heading.group(2))}</h{level}>")
         elif stripped.startswith(">"):
             lines_out.append(f"<blockquote>{esc(stripped.lstrip('> ').strip())}</blockquote>")
         elif re.fullmatch(r"[-=*_:|\s\u200c]+", stripped):
@@ -132,6 +132,33 @@ DOC_PAGE_TEMPLATE = """<!DOCTYPE html>
 </head><body>
 <main class="doc">{body}</main>
 </body></html>"""
+
+
+def _instrument_text_page(record: dict[str, Any]) -> str:
+    """Render an instrument's canonical provisions as one HTML page.
+
+    Fallback for instruments ingested without an original source file
+    (``cats_ingest``): the mirror only carries summaries, but the article
+    text is still in ``canonical.provision_versions``.
+    """
+    title = html.escape(record.get("title") or "")
+    provisions = record.get("provisions", [])
+    if not provisions:
+        return DOC_PAGE_TEMPLATE.replace(
+            "{body}", f"<h1>{title}</h1><p>متنی برای این قانون ثبت نشده است.</p>"
+        )
+    # A single generic "متن" provision is the raw markdown document itself;
+    # render it as markdown so its headings/quote show properly.
+    if len(provisions) == 1 and (provisions[0].get("label") or "").strip() in ("", "متن"):
+        body = _md_to_html(provisions[0].get("text") or "")
+        return DOC_PAGE_TEMPLATE.replace("{body}", body if "<h1>" in body else f"<h1>{title}</h1>{body}")
+    parts = [f"<h1>{title}</h1>"]
+    for provision in provisions:
+        label = str(provision.get("label") or provision.get("number") or "")
+        if label:
+            parts.append(f"<h2>{html.escape(label)}</h2>")
+        parts.append(f"<p>{html.escape(provision.get('text') or '')}</p>")
+    return DOC_PAGE_TEMPLATE.replace("{body}", "\n".join(parts))
 
 
 class ReviewRequestInput(StrictModel):
@@ -166,6 +193,29 @@ class EvaluationInput(StrictModel):
     cases: tuple[EvaluationCaseInput, ...] = Field(min_length=1, max_length=500)
 
 
+class CypherInput(StrictModel):
+    query: str = Field(min_length=1, max_length=20_000)
+    params: dict[str, Any] = Field(default_factory=dict)
+    row_limit: int = Field(default=200, ge=1, le=2_000)
+
+
+class GraphChatMessage(StrictModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=8_000)
+
+
+class GraphChatInput(StrictModel):
+    message: str = Field(min_length=1, max_length=8_000)
+    history: tuple[GraphChatMessage, ...] = Field(default=(), max_length=40)
+
+
+class LLMSettingsInput(StrictModel):
+    base_url: str = Field(min_length=1, max_length=400)
+    model: str = Field(min_length=1, max_length=200)
+    #: Omit (or send blank) to keep the currently saved key.
+    api_key: str | None = Field(default=None, max_length=400)
+
+
 @dataclass(frozen=True, slots=True)
 class APIContainer:
     research: ResearchApplicationService
@@ -178,6 +228,12 @@ class APIContainer:
     history: ResearchHistoryStore | None = None
     oidc: "OIDCProvider | None" = None
     default_principal: "Principal | None" = None
+    #: FalkorDB handle for the read-only laws projection (laws_canonical_v1).
+    laws_graph: Any | None = None
+    #: Graph-guide chat agent (None = feature off: FalkorDB or LLM unset).
+    graph_chat: Any | None = None
+    #: Runtime LLM gateway settings provider (workspace settings panel).
+    llm_settings: Any | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -576,7 +632,8 @@ def create_app(container: APIContainer) -> FastAPI:
             if center:
                 cur.execute(
                     """SELECT i.instrument_id, i.title, i.instrument_type, i.authority_level, i.issuer,
-                              (SELECT count(*) FROM canonical.provisions p WHERE p.instrument_id = i.instrument_id)
+                              (SELECT count(*) FROM canonical.provisions p WHERE p.instrument_id = i.instrument_id),
+                              (SELECT s.summary FROM canonical.instrument_summaries s WHERE s.instrument_id = i.instrument_id)
                        FROM canonical.legal_instruments i WHERE i.instrument_id = %s""",
                     (center,),
                 )
@@ -585,7 +642,8 @@ def create_app(container: APIContainer) -> FastAPI:
             if pattern:
                 cur.execute(
                     """SELECT i.instrument_id, i.title, i.instrument_type, i.authority_level, i.issuer,
-                              (SELECT count(*) FROM canonical.provisions p WHERE p.instrument_id = i.instrument_id)
+                              (SELECT count(*) FROM canonical.provisions p WHERE p.instrument_id = i.instrument_id),
+                              (SELECT s.summary FROM canonical.instrument_summaries s WHERE s.instrument_id = i.instrument_id)
                        FROM canonical.legal_instruments i WHERE i.title ILIKE %s
                        ORDER BY title LIMIT %s""",
                     (pattern, limit),
@@ -593,7 +651,8 @@ def create_app(container: APIContainer) -> FastAPI:
             else:
                 cur.execute(
                     """SELECT i.instrument_id, i.title, i.instrument_type, i.authority_level, i.issuer,
-                              (SELECT count(*) FROM canonical.provisions p WHERE p.instrument_id = i.instrument_id)
+                              (SELECT count(*) FROM canonical.provisions p WHERE p.instrument_id = i.instrument_id),
+                              (SELECT s.summary FROM canonical.instrument_summaries s WHERE s.instrument_id = i.instrument_id)
                        FROM canonical.legal_instruments i
                        ORDER BY (SELECT count(*) FROM canonical.provisions p
                                  WHERE p.instrument_id = i.instrument_id) DESC
@@ -613,8 +672,8 @@ def create_app(container: APIContainer) -> FastAPI:
                    JOIN sources.source_documents sd ON sd.document_uid = e.affecting_document_uid
                    JOIN sources.instruments si ON si.instrument_uid = sd.instrument_uid
                    LEFT JOIN sources.instruments di ON di.instrument_uid = e.affected_instrument_uid
-                   JOIN canonical.legal_instruments ci ON ci.canonical_title = si.canonical_title
-                   LEFT JOIN canonical.legal_instruments ci2 ON ci2.canonical_title = di.canonical_title
+                   JOIN canonical.legal_instruments ci ON ci.canonical_title = si.canonical_key
+                   LEFT JOIN canonical.legal_instruments ci2 ON ci2.canonical_title = di.canonical_key
                    ORDER BY e.effect_uid, ci.instrument_id, ci2.instrument_id NULLS LAST
                 """
             )
@@ -647,19 +706,25 @@ def create_app(container: APIContainer) -> FastAPI:
                     )
                     if table.endswith("legal_instruments"):
                         cur.execute(
-                            "SELECT instrument_id, title, instrument_type, authority_level, issuer FROM canonical.legal_instruments WHERE instrument_id = %s",
+                            """SELECT i.instrument_id, i.title, i.instrument_type, i.authority_level, i.issuer,
+                                      (SELECT count(*) FROM canonical.provisions p WHERE p.instrument_id = i.instrument_id),
+                                      (SELECT s.summary FROM canonical.instrument_summaries s WHERE s.instrument_id = i.instrument_id)
+                               FROM canonical.legal_instruments i WHERE i.instrument_id = %s""",
                             (node_id,),
                         )
                     else:
                         cur.execute(
-                            "SELECT provision_id, COALESCE(NULLIF(label, ''), provision_id), provision_type, number, NULL FROM canonical.provisions WHERE provision_id = %s",
+                            """SELECT p.provision_id, COALESCE(NULLIF(p.label, ''), p.provision_id), p.provision_type, p.number, NULL, NULL,
+                                      (SELECT s.summary FROM canonical.provision_summaries s WHERE s.provision_id = p.provision_id)
+                               FROM canonical.provisions p WHERE p.provision_id = %s""",
                             (node_id,),
                         )
                     row = cur.fetchone()
                     if row:
                         node_rows.append(tuple(row))
                 node_ids.extend(extra)
-            if node_ids:
+            if node_ids and center:
+                # Focused view: keep raw provision/instrument edges.
                 cur.execute(
                     """SELECT edge_id, source_node_id, target_node_id, edge_type
                        FROM canonical.graph_edges
@@ -667,30 +732,32 @@ def create_app(container: APIContainer) -> FastAPI:
                     (node_ids, node_ids),
                 )
                 edge_rows = cur.fetchall()
-                if not center:
-                    # Overview mode: map relation endpoints to their owning
-                    # instrument (edges may connect provisions, instruments,
-                    # or a provision to an instrument) and aggregate them so
-                    # the graph shows instrument-level edges.
-                    cur.execute(
-                        """SELECT 'edge:agg:' || md5(
-                                   COALESCE(sp.instrument_id, e.source_node_id)
-                                   || COALESCE(tp.instrument_id, e.target_node_id)
-                                   || e.edge_type),
-                                  COALESCE(sp.instrument_id, e.source_node_id),
-                                  COALESCE(tp.instrument_id, e.target_node_id),
-                                  e.edge_type, count(*)
-                           FROM canonical.graph_edges e
-                           LEFT JOIN canonical.provisions sp ON sp.provision_id = e.source_node_id
-                           LEFT JOIN canonical.provisions tp ON tp.provision_id = e.target_node_id
-                           WHERE COALESCE(sp.instrument_id, e.source_node_id) = ANY(%s)
-                             AND COALESCE(tp.instrument_id, e.target_node_id) = ANY(%s)
-                             AND COALESCE(sp.instrument_id, e.source_node_id)
-                                 <> COALESCE(tp.instrument_id, e.target_node_id)
-                           GROUP BY 2, 3, 4""",
-                        (node_ids, node_ids),
-                    )
-                    edge_rows.extend(cur.fetchall())
+            elif node_ids:
+                # Overview mode: map relation endpoints to their owning
+                # instrument (edges may connect provisions, instruments,
+                # or a provision to an instrument) and aggregate them so
+                # the graph shows ONE instrument-level edge per
+                # (source, target, type). Running the raw query here too
+                # would duplicate every instrument->instrument edge.
+                cur.execute(
+                    """SELECT 'edge:agg:' || md5(
+                               COALESCE(sp.instrument_id, e.source_node_id)
+                               || COALESCE(tp.instrument_id, e.target_node_id)
+                               || e.edge_type),
+                              COALESCE(sp.instrument_id, e.source_node_id),
+                              COALESCE(tp.instrument_id, e.target_node_id),
+                              e.edge_type, count(*)
+                       FROM canonical.graph_edges e
+                       LEFT JOIN canonical.provisions sp ON sp.provision_id = e.source_node_id
+                       LEFT JOIN canonical.provisions tp ON tp.provision_id = e.target_node_id
+                       WHERE COALESCE(sp.instrument_id, e.source_node_id) = ANY(%s)
+                         AND COALESCE(tp.instrument_id, e.target_node_id) = ANY(%s)
+                         AND COALESCE(sp.instrument_id, e.source_node_id)
+                             <> COALESCE(tp.instrument_id, e.target_node_id)
+                       GROUP BY 2, 3, 4""",
+                    (node_ids, node_ids),
+                )
+                edge_rows = cur.fetchall()
             else:
                 edge_rows = []
             cur.execute("SELECT count(*) FROM canonical.graph_edges")
@@ -705,6 +772,7 @@ def create_app(container: APIContainer) -> FastAPI:
                 "tier": row[3],
                 "issuer": row[4],
                 "provisions": (row[5] or 0) if len(row) > 5 else 0,
+                "summary": row[6] if len(row) > 6 else None,
             }
             for row in node_rows
         }
@@ -762,16 +830,21 @@ def create_app(container: APIContainer) -> FastAPI:
                     "provisions": 0,
                 },
             )
-            edges.append(
-                {
-                    "id": f"effect:{row[0]}",
-                    "source": row[5],
-                    "target": row[7],
-                    "kind": row[1],
-                    "status": row[2],
-                    "witness": row[3],
-                }
-            )
+            if row[2] == "candidate":
+                # Only pending candidates become edges here. Approved effects
+                # were already published to canonical.graph_edges (appending
+                # them again duplicated every amend/repeal edge), and rejected
+                # ones must not appear at all.
+                edges.append(
+                    {
+                        "id": f"effect:{row[0]}",
+                        "source": row[5],
+                        "target": row[7],
+                        "kind": row[1],
+                        "status": row[2],
+                        "witness": row[3],
+                    }
+                )
         return {
             "organization_id": organization_id,
             "center": center,
@@ -787,6 +860,209 @@ def create_app(container: APIContainer) -> FastAPI:
                 "provisions": provisions_total,
             },
         }
+
+    @app.post(
+        "/v1/organizations/{organization_id}/graph/cypher",
+        tags=["graph"],
+    )
+    def run_laws_cypher(
+        organization_id: str,
+        payload: CypherInput,
+        principal: CurrentPrincipal,
+    ) -> dict[str, Any]:
+        """Read-only Cypher against the FalkorDB laws projection.
+
+        The graph mirrors canonical instruments, provisions and graph_edges
+        (rel types are the UPPER_SNAKE form of edge_type, e.g.
+        SUBORDINATE_TO, EXPLICITLY_REFERENCES). Queries run through
+        GRAPH.RO_QUERY so writes are rejected server-side.
+        """
+        container.authorization.require(
+            principal, Permission.READ_LIBRARY, organization_id
+        )
+        graph = container.laws_graph
+        if graph is None:
+            raise DomainError(
+                "falkordb laws projection is not configured (FALKORDB_URL unset)"
+            )
+
+        def to_json(value: Any) -> Any:
+            if value is None or isinstance(value, (str, int, float, bool)):
+                return value
+            properties = getattr(value, "properties", None)
+            if properties is not None:
+                labels = getattr(value, "labels", None)
+                if labels is not None:
+                    return {
+                        "id": getattr(value, "id", None),
+                        "label": ",".join(sorted(labels))
+                        if isinstance(labels, (set, frozenset, list, tuple))
+                        else labels,
+                        "properties": properties,
+                    }
+                # FalkorDB edge: src_node/dest_node carry the global node ids
+                return {
+                    "id": getattr(value, "id", None),
+                    "label": getattr(value, "relation", "RELATES"),
+                    "from": getattr(value, "src_node", None),
+                    "to": getattr(value, "dest_node", None),
+                    "properties": properties,
+                }
+            if isinstance(value, (list, tuple, set, frozenset)):
+                return [to_json(item) for item in value]
+            if isinstance(value, dict):
+                return {str(key): to_json(item) for key, item in value.items()}
+            nodes = getattr(value, "nodes", None)
+            if callable(nodes):
+                return {
+                    "nodes": [to_json(node) for node in value.nodes()],
+                    "relationships": [to_json(edge) for edge in value.edges()],
+                }
+            return str(value)
+
+        started = perf_counter()
+        try:
+            result = graph.ro_query(payload.query, payload.params or None)
+        except Exception as exc:  # noqa: BLE001 — surface FalkorDB errors to the client
+            raise DomainError(f"cypher query failed: {str(exc)[:300]}") from exc
+        raw_rows = [list(row) for row in result.result_set]
+        truncated = len(raw_rows) > payload.row_limit
+        header = result.header or []
+        return {
+            "organization_id": organization_id,
+            "graph": getattr(graph, "name", LAWS_GRAPH_ID),
+            "columns": [str(column[1]) for column in header],
+            "rows": [to_json(row) for row in raw_rows[: payload.row_limit]],
+            "row_count": len(raw_rows),
+            "truncated": truncated,
+            "duration_ms": round((perf_counter() - started) * 1000, 1),
+        }
+
+    @app.post(
+        "/v1/organizations/{organization_id}/graph/sync",
+        tags=["graph"],
+    )
+    def sync_laws_graph_endpoint(
+        organization_id: str,
+        principal: CurrentPrincipal,
+    ) -> dict[str, Any]:
+        """Manually rebuild the FalkorDB laws projection from Postgres.
+
+        Auto-synced at startup; this forces a fresh rebuild after publishing
+        relations or ingesting laws without restarting the API."""
+        container.authorization.require(
+            principal, Permission.MANAGE_INGESTION, organization_id
+        )
+        graph = container.laws_graph
+        if graph is None:
+            raise DomainError(
+                "falkordb laws projection is not configured (FALKORDB_URL unset)"
+            )
+        from .adapters.postgres import PostgresCanonicalRepository
+        from .laws_mirror import sync_laws_mirror
+
+        canonical = library.canonical
+        if not isinstance(canonical, PostgresCanonicalRepository):
+            raise DomainError("laws mirror sync requires the postgres canonical store")
+        return sync_laws_mirror(canonical.connection, graph)
+
+    @app.post(
+        "/v1/organizations/{organization_id}/graph/chat/stream",
+        tags=["graph"],
+        responses={200: {"content": {"text/event-stream": {}}}},
+    )
+    def stream_graph_chat(
+        organization_id: str,
+        payload: GraphChatInput,
+        principal: CurrentPrincipal,
+    ) -> StreamingResponse:
+        """Server-sent events for the graph-guide chat agent.
+
+        Events: ``tool_call``/``tool_error``/``contract_error``/``answering``
+        progress frames, a final ``answer`` carrying ``{answer, nodes, steps,
+        completed}``, then ``done``. Conversation history is supplied by the
+        client; the tools run read-only against the FalkorDB laws projection.
+        """
+        container.authorization.require(
+            principal, Permission.READ_LIBRARY, organization_id
+        )
+        chat = container.graph_chat
+        if chat is None or not getattr(chat, "available", True):
+            raise DomainError(
+                "graph chat is not configured "
+                "(set the LLM API key in تنظیمات / workspace settings)"
+            )
+
+        def event_frames():
+            try:
+                history = [
+                    {"role": item.role, "content": item.content}
+                    for item in payload.history
+                ]
+                for event in chat.stream(payload.message, history):
+                    if event.get("type") == "completed":
+                        yield _sse_frame({"type": "answer", "data": event["result"]})
+                        yield "event: done\ndata: {}\n\n"
+                    else:
+                        yield _sse_frame(event)
+            except DomainError as exc:
+                yield _sse_frame({"type": "failed", "message": str(exc)})
+
+        return StreamingResponse(
+            event_frames(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    def _llm_settings_provider() -> Any:
+        provider = container.llm_settings
+        if provider is None:
+            raise DomainError("LLM settings are not available in this deployment")
+        return provider
+
+    @app.get("/v1/settings/llm", tags=["settings"])
+    def get_llm_settings(principal: CurrentPrincipal) -> dict[str, Any]:
+        """Current LLM gateway configuration (API key masked)."""
+        container.authorization.require(
+            principal, Permission.READ_METRICS, principal.organization_id
+        )
+        return _llm_settings_provider().config.public()
+
+    @app.put("/v1/settings/llm", tags=["settings"])
+    def update_llm_settings(
+        payload: LLMSettingsInput, principal: CurrentPrincipal
+    ) -> dict[str, Any]:
+        """Persist the LLM gateway configuration and rebuild the chat agent.
+
+        A blank ``api_key`` keeps the previously saved key; the key is never
+        returned in full afterwards.
+        """
+        container.authorization.require(
+            principal, Permission.MANAGE_INGESTION, principal.organization_id
+        )
+        provider = _llm_settings_provider()
+        base_url = payload.base_url.strip()
+        if not base_url.startswith(("http://", "https://")):
+            raise DomainError("base_url must start with http:// or https://")
+        model = payload.model.strip()
+        if not model:
+            raise DomainError("model must not be blank")
+        api_key = (payload.api_key or "").strip() or provider.config.api_key
+        if not api_key:
+            raise DomainError("API key is required")
+        from .runtime_settings import LLMConfig
+
+        provider.store.save(LLMConfig(base_url=base_url, model=model, api_key=api_key))
+        provider.reload()
+        return provider.config.public()
+
+    @app.post("/v1/settings/llm/test", tags=["settings"])
+    def test_llm_settings(principal: CurrentPrincipal) -> dict[str, Any]:
+        """Make one tiny call to the configured gateway to verify it works."""
+        container.authorization.require(
+            principal, Permission.READ_METRICS, principal.organization_id
+        )
+        return _llm_settings_provider().probe()
 
     @app.post(
         "/v1/organizations/{organization_id}/effects/{effect_uid}/review",
@@ -817,6 +1093,9 @@ def create_app(container: APIContainer) -> FastAPI:
             "replace": "replaces",
             "suspend": "suspends",
             "restore": "restores",
+            "implement": "implements",
+            "interpret": "interprets",
+            "conflict": "conflicts_with",
         }
         with canonical.connection.cursor() as cur:
             cur.execute(
@@ -826,8 +1105,8 @@ def create_app(container: APIContainer) -> FastAPI:
                    JOIN sources.source_documents sd ON sd.document_uid = e.affecting_document_uid
                    JOIN sources.instruments si ON si.instrument_uid = sd.instrument_uid
                    LEFT JOIN sources.instruments di ON di.instrument_uid = e.affected_instrument_uid
-                   LEFT JOIN canonical.legal_instruments ci ON ci.canonical_title = si.canonical_title
-                   LEFT JOIN canonical.legal_instruments ci2 ON ci2.canonical_title = di.canonical_title
+                   LEFT JOIN canonical.legal_instruments ci ON ci.canonical_title = si.canonical_key
+                   LEFT JOIN canonical.legal_instruments ci2 ON ci2.canonical_title = di.canonical_key
                    WHERE e.effect_uid = %s""",
                 (effect_uid,),
             )
@@ -920,7 +1199,7 @@ def create_app(container: APIContainer) -> FastAPI:
                            WHERE e.source_node_id = i.instrument_id OR e.target_node_id = i.instrument_id) AS edges,
                           dv.document_version_id,
                           sd.external_id AS slug,
-                          (sd.original_path IS NOT NULL) AS has_pdf,
+                          (sd.original_path ILIKE '%%.pdf') AS has_pdf,
                           (sd.text_path IS NOT NULL) AS has_text
                    FROM canonical.legal_instruments i
                    LEFT JOIN LATERAL (
@@ -928,7 +1207,7 @@ def create_app(container: APIContainer) -> FastAPI:
                        WHERE d2.instrument_id = i.instrument_id
                        ORDER BY d2.enacted_at DESC NULLS LAST LIMIT 1
                    ) dv ON true
-                   LEFT JOIN sources.instruments src ON src.canonical_title = i.canonical_title
+                   LEFT JOIN sources.instruments src ON src.canonical_key = i.canonical_title
                    LEFT JOIN LATERAL (
                        SELECT s2.external_id, s2.original_path, s2.text_path
                        FROM sources.source_documents s2
@@ -979,7 +1258,7 @@ def create_app(container: APIContainer) -> FastAPI:
             cur.execute(
                 """SELECT sd.external_id, sd.original_path, sd.text_path
                    FROM canonical.legal_instruments i
-                   JOIN sources.instruments si ON si.canonical_title = i.canonical_title
+                   JOIN sources.instruments si ON si.canonical_key = i.canonical_title
                    JOIN sources.source_documents sd ON sd.instrument_uid = si.instrument_uid
                    WHERE i.instrument_id = %s
                    ORDER BY sd.original_path NULLS LAST LIMIT 1""",
@@ -989,7 +1268,10 @@ def create_app(container: APIContainer) -> FastAPI:
         if row is None:
             raise NotFoundError(f"no source file for instrument {instrument_id!r}")
         slug, pdf_path, text_path = row
-        fmt = "pdf" if pdf_path else ("markdown" if text_path else None)
+        # `original_path` is only a real PDF for the ekhtebar laws corpus; the
+        # cats pipeline stores the markdown there too, so trust the extension.
+        has_pdf = bool(pdf_path) and pdf_path.lower().endswith(".pdf")
+        fmt = "pdf" if has_pdf else ("markdown" if text_path else None)
         if fmt is None:
             raise NotFoundError("no original pdf or markdown file for this law")
         return {
@@ -1016,18 +1298,125 @@ def create_app(container: APIContainer) -> FastAPI:
             raise DomainError("law source requires the postgres canonical repository")
         with canonical.connection.cursor() as cur:
             cur.execute(
-                """SELECT sd.original_path, sd.text_path, i.title
+                """SELECT sd.original_path, sd.text_path
                    FROM canonical.legal_instruments i
-                   JOIN sources.instruments si ON si.canonical_title = i.canonical_title
+                   JOIN sources.instruments si ON si.canonical_key = i.canonical_title
                    JOIN sources.source_documents sd ON sd.instrument_uid = si.instrument_uid
                    WHERE i.instrument_id = %s
                    ORDER BY sd.original_path NULLS LAST LIMIT 1""",
                 (instrument_id,),
             )
             row = cur.fetchone()
-        if row is None:
+        if row is not None:
+            pdf_path, text_path = row
+            if pdf_path and pdf_path.lower().endswith(".pdf") and Path(pdf_path).exists():
+                return FileResponse(
+                    pdf_path,
+                    media_type="application/pdf",
+                    headers={"Content-Disposition": "inline"},
+                )
+            if text_path and Path(text_path).exists():
+                md_text = Path(text_path).read_text(encoding="utf-8", errors="replace")
+                page = DOC_PAGE_TEMPLATE.replace("{body}", _md_to_html(md_text))
+                page = page.replace(
+                    "<h1>",
+                    '<h1><span class="doc-title-chip">متن رسمی</span><br>',
+                    1,
+                )
+                return HTMLResponse(page)
+        # No original source file (e.g. the cats_ingest corpus): fall back to the
+        # canonical provisions, whose verbatim text is still available.
+        from .law_text import fetch_instrument_text
+
+        record = fetch_instrument_text(canonical.connection, instrument_id)
+        if record is None:
             raise NotFoundError(f"no source file for instrument {instrument_id!r}")
-        pdf_path, text_path, title = row
+        return HTMLResponse(_instrument_text_page(record))
+
+    @app.get(
+        "/v1/organizations/{organization_id}/laws/provisions/{provision_id}",
+        tags=["graph"],
+    )
+    def get_law_provision(
+        organization_id: str, provision_id: str, principal: CurrentPrincipal
+    ) -> dict[str, Any]:
+        """Full text of one provision, read on demand from the canonical store.
+
+        The FalkorDB mirror only carries provision labels/summaries, so the
+        explore UI fetches the verbatim article text here when a Provision node
+        is selected.
+        """
+        container.authorization.require(
+            principal, Permission.READ_LIBRARY, organization_id
+        )
+        from .adapters.postgres import PostgresCanonicalRepository
+        from .law_text import fetch_provision_text
+
+        canonical = library.canonical
+        if not isinstance(canonical, PostgresCanonicalRepository):
+            raise DomainError("provision text requires the postgres canonical repository")
+        record = fetch_provision_text(canonical.connection, provision_id)
+        if record is None:
+            raise NotFoundError(f"provision {provision_id!r} not found")
+        return {"organization_id": organization_id, **record}
+
+    @app.get(
+        "/v1/organizations/{organization_id}/laws/provisions/{provision_id}/text",
+        tags=["graph"],
+        response_class=HTMLResponse,
+    )
+    def get_law_provision_text(
+        organization_id: str, provision_id: str, principal: CurrentPrincipal
+    ) -> Any:
+        """Server-rendered HTML of one provision for the explore text link."""
+        container.authorization.require(
+            principal, Permission.READ_LIBRARY, organization_id
+        )
+        from .adapters.postgres import PostgresCanonicalRepository
+        from .law_text import fetch_provision_text
+
+        canonical = library.canonical
+        if not isinstance(canonical, PostgresCanonicalRepository):
+            raise DomainError("provision text requires the postgres canonical repository")
+        record = fetch_provision_text(canonical.connection, provision_id)
+        if record is None:
+            raise NotFoundError(f"provision {provision_id!r} not found")
+        heading = record.get("label") or record.get("number") or "ماده"
+        meta = record.get("instrument_title") or ""
+        if record.get("effective_from"):
+            meta = f"{meta} · از {record['effective_from']}" if meta else f"از {record['effective_from']}"
+        body = record.get("text") or "متنی برای این ماده ثبت نشده است."
+        page = DOC_PAGE_TEMPLATE.replace("{body}", _md_to_html(f"# {heading}\n\n{meta}\n\n{body}"))
+        return HTMLResponse(page)
+
+    @app.get(
+        "/v1/organizations/{organization_id}/laws/documents/{document_uid}/source/file",
+        tags=["graph"],
+    )
+    def get_law_document_source_file(
+        organization_id: str, document_uid: str, principal: CurrentPrincipal
+    ) -> Any:
+        """Original text/PDF of a judicial source document (رأی / نظریه مشورتی)."""
+        container.authorization.require(
+            principal, Permission.READ_LIBRARY, organization_id
+        )
+        from .adapters.postgres import PostgresCanonicalRepository
+
+        canonical = library.canonical
+        if not isinstance(canonical, PostgresCanonicalRepository):
+            raise DomainError("law source requires the postgres canonical repository")
+        with canonical.connection.cursor() as cur:
+            cur.execute(
+                """SELECT original_path, text_path
+                   FROM sources.source_documents
+                   WHERE document_uid::text = %s
+                   LIMIT 1""",
+                (document_uid,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise NotFoundError(f"no source document for {document_uid!r}")
+        pdf_path, text_path = row
         if pdf_path and Path(pdf_path).exists():
             return FileResponse(
                 pdf_path,
@@ -1039,7 +1428,7 @@ def create_app(container: APIContainer) -> FastAPI:
             page = DOC_PAGE_TEMPLATE.replace("{body}", _md_to_html(md_text))
             page = page.replace(
                 "<h1>",
-                f'<h1><span class="doc-title-chip">متن رسمی</span><br>{title}</h1>',
+                '<h1><span class="doc-title-chip">متن رسمی</span><br>',
                 1,
             )
             return HTMLResponse(page)

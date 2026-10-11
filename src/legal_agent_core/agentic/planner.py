@@ -35,6 +35,8 @@ class PlannerDecision:
     sufficiency_level: str | None = None
     sufficiency_basis: str | None = None
     sufficiency_gaps: tuple[str, ...] = ()
+    #: Graph-guide chat only: node references for clickable graph focus.
+    nodes: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +169,7 @@ def _parse_decision(
             sufficiency_level=level,
             sufficiency_basis=basis,
             sufficiency_gaps=gaps,
+            nodes=parse_node_refs(payload.get("nodes", [])),
         ), None
     if action == "abstain":
         reason = payload.get("reason")
@@ -176,9 +179,37 @@ def _parse_decision(
     return None, f"unknown planner action {action!r}"
 
 
+def parse_node_refs(raw: object) -> tuple[dict[str, Any], ...]:
+    """Best-effort node references on an answer (graph-guide chat only).
+
+    Malformed entries are dropped rather than rejected: nodes are a UI
+    affordance, never the substance of the answer.
+    """
+    if not isinstance(raw, list):
+        return ()
+    nodes: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        node_id = item.get("id")
+        if not isinstance(node_id, str) or not node_id.strip() or node_id in seen:
+            continue
+        seen.add(node_id)
+        nodes.append(
+            {
+                "id": node_id.strip(),
+                "label": item.get("label") if isinstance(item.get("label"), str) else "node",
+                "title": item.get("title") if isinstance(item.get("title"), str) else node_id,
+            }
+        )
+    return tuple(nodes[:20])
+
+
 __all__ = [
     "LLMToolPlanner",
     "PlannerDecision",
     "PlannerTurn",
     "ToolPlanner",
+    "parse_node_refs",
 ]

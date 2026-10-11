@@ -37,6 +37,25 @@ class FalkorClient(Protocol):
     def select_graph(self, graph_id: str) -> FalkorGraph: ...
 
 
+#: FalkorDB graph that mirrors the canonical laws corpus (instruments,
+#: provisions, graph_edges) so Cypher can be used for legal queries. Kept in
+#: sync by scripts/sync_laws_graph_falkordb.py and exposed read-only through
+#: POST /v1/organizations/{org}/graph/cypher.
+LAWS_GRAPH_ID = "laws_canonical_v1"
+
+
+def connect_laws_graph(url: str) -> FalkorGraph:
+    """Connect to the shared laws projection graph (read/write handle).
+
+    socket_timeout is raised: the full-rebuild sync runs large UNWIND batches
+    that can exceed redis-py's default socket timeout under load.
+    """
+    from falkordb import FalkorDB
+
+    client = FalkorDB.from_url(url, socket_timeout=600)
+    return client.select_graph(LAWS_GRAPH_ID)
+
+
 RELATION_COLUMNS = """
 r.relation_id,
 r.organization_id,

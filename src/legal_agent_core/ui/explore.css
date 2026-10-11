@@ -1,0 +1,28 @@
+/* Explore page layout — kept out of the HTML because the CSP (style-src 'self')
+   blocks inline <style> blocks. */
+.ex-left { width: 280px; flex: 0 1 280px; min-width: 210px; }
+.ex-group { padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.ex-group h5 { margin: 0 0 8px; color: #fff; font-size: 12.5px; }
+.ex-checks { display: flex; flex-direction: column; gap: 5px; }
+.ex-checks label { display: flex; align-items: center; gap: 7px; font-size: 12px; color: #cfd8e0; cursor: pointer; }
+.ex-checks input { accent-color: #4cc2ff; }
+.ex-row { display: flex; gap: 8px; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.ex-row select, .ex-row input[type=number] { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font-family: inherit; }
+.ex-run { width: calc(100% - 28px); margin: 12px 14px; }
+#ex-canvas { position: absolute; inset: 0; background: radial-gradient(circle at 50% 30%, #14191e 0%, #0d1114 70%); }
+.canvas-wrap { min-width: 320px; }
+.ex-right { width: 340px; flex: 0 1 340px; min-width: 270px; background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; overflow-x: hidden; }
+.prop-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 11.5px; direction: ltr; }
+.prop-table td { padding: 3px 6px; border-bottom: 1px solid #232c36; vertical-align: top; overflow-wrap: anywhere; }
+.prop-table td:first-child { color: var(--accent); width: 88px; }
+.prop-table a.text-link { color: var(--accent); text-decoration: none; }
+.prop-table a.text-link:hover { text-decoration: underline; }
+.ex-neighbors { max-height: 260px; overflow-y: auto; }
+.ex-neighbors .card { margin-bottom: 6px; }
+.summary-card { border-color: #2f6ea5; background: #16222e; line-height: 1.9; }
+.summary-card h4 { color: var(--accent); }
+@media (max-width: 980px) {
+  .ex-left { min-width: 170px; width: 170px; flex-basis: 170px; }
+  .ex-right { min-width: 230px; width: 230px; flex-basis: 230px; }
+  .canvas-wrap { min-width: 260px; }
+}

@@ -439,7 +439,7 @@ def main() -> int:
     rows = db.execute(
         """SELECT document_uid, external_id, title, text_path, original_checksum, metadata
            FROM sources.source_documents
-           WHERE source_id='ekhtebar' AND metadata ? 'cat' AND text_path IS NOT NULL
+           WHERE source_id IN ('ekhtebar', 'cats') AND metadata ? 'cat' AND text_path IS NOT NULL
            ORDER BY document_uid"""
     ).fetchall()
     if wanted:
