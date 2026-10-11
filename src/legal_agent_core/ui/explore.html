@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>کاوش گراف — عامل پژوهش حقوقی</title>
 <link rel="stylesheet" href="/ui/styles.css">
-<link rel="stylesheet" href="/ui/graph.css?v=10">
-<link rel="stylesheet" href="/ui/explore.css?v=2">
+<link rel="stylesheet" href="/ui/graph.css?v=12">
+<link rel="stylesheet" href="/ui/explore.css?v=4">
 </head>
 <body>
 <header>
-  <div class="brand">⚖️ عامل پژوهش حقوقی<small style="display:block;color:#8b98a5;font-weight:400;font-size:11px;">کاوش گراف</small></div>
+  <div class="brand">⚖️ عامل پژوهش حقوقی<small>کاوش گراف</small></div>
   <nav>
     <a href="/workspace">میز کار</a>
     <a href="/ui/graph.html">گراف</a>
@@ -20,6 +20,14 @@
 </header>
 <div class="layout">
   <div class="side ex-left">
+    <div class="ex-group">
+      <h5>جستجو</h5>
+      <div class="ex-search">
+        <input type="search" id="ex-search-input" placeholder="نام قانون، رأی یا نظریه…" autocomplete="off">
+        <button id="ex-search-btn" class="primary">جستجو</button>
+      </div>
+      <div id="ex-search-results" class="ex-search-results"></div>
+    </div>
     <div class="ex-group">
       <h5>گره‌ها</h5>
       <div class="ex-checks" id="ex-nodes">در حال بارگذاری…</div>
@@ -35,7 +43,7 @@
       <input type="number" id="ex-limit" value="800" min="10" max="5000" step="10">
     </div>
     <button id="ex-run" class="primary ex-run">نمایش گراف</button>
-    <div class="block muted" style="font-size:11px;line-height:1.8">
+    <div class="block muted ex-side-note">
       نوع گره‌ها و یال‌ها را انتخاب کن؛ کوئری Cypher معادلش ساخته می‌شود. با «⌘ Cypher» پایین
       صفحه می‌توانی کوئری را دستی بنویسی و اجرا کنی. روی هر گره کلیک کن تا اطلاعات و
       همسایه‌هایش را ببینی.
@@ -75,7 +83,7 @@
   </div>
 </div>
 <script src="/ui/vendor/vis-network.min.js"></script>
-<script src="/ui/explore.js?v=17"></script>
-<script src="/ui/chat.js?v=1" defer></script>
+<script src="/ui/explore.js?v=21"></script>
+<script src="/ui/chat.js?v=3" defer></script>
 </body>
 </html>

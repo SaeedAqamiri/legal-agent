@@ -9,6 +9,8 @@ const ex = {
   selected: null,
   frozen: false,
   keepIsolates: false,
+  centerNodeId: null, // expanded node stays pinned to the view center
+  lastExpand: null,   // {ident, depth, avoid} while the view is an expansion
 };
 
 const cy = { view: "graph" };
@@ -49,6 +51,17 @@ function exSetFrozen(value) {
   if (ex.network) ex.network.setOptions({ physics: { enabled: !value } });
   const btn = byId("ex-toggle-physics");
   if (btn) { btn.textContent = value ? "▶" : "⏸"; btn.classList.toggle("active", value); }
+}
+
+function centerOnNode(id, animate = false) {
+  if (!ex.network || !id) return;
+  const pos = ex.network.getPositions([id])[id];
+  if (!pos) return;
+  ex.network.moveTo({
+    position: pos,
+    scale: ex.network.getScale(),
+    animation: animate ? { duration: 400, easingFunction: "easeInOutQuad" } : false,
+  });
 }
 
 async function api(path, options = {}) {
@@ -114,30 +127,51 @@ function render(opts = {}) {
   // keep only connected nodes: isolated nodes have no relation in the current
   // filter, fly far under repulsion and wreck the fit/zoom. Free-form Cypher
   // results (e.g. MATCH (n) RETURN n) opt out via opts.keepIsolates so
-  // node-only results still render.
+  // node-only results still render. opts.filters ({labels, rels} Sets of the
+  // checked types) hides unchecked types live; the expanded node (focusId)
+  // stays visible. opts.positions + opts.seededLayout re-render a filtered
+  // view in place: nodes keep their coordinates and physics stays off so the
+  // layout does not reshuffle on every checkbox toggle.
   const keep = opts.keepIsolates !== undefined ? opts.keepIsolates : ex.keepIsolates;
+  const filters = opts.filters || null;
+  const positions = opts.positions || null;
+  const edgesAll = [...ex.edges.values()].filter((e) => !filters || filters.rels.has(e.label));
   const used = new Set();
-  for (const e of ex.edges.values()) { used.add(String(e.from)); used.add(String(e.to)); }
-  const focusLabels = opts.focusLabels || null; // expand mode: highlight set
+  for (const e of edgesAll) { used.add(String(e.from)); used.add(String(e.to)); }
+  const isFocusNode = (n) => Boolean(opts.focusId)
+    && (String(n.props.id) === String(opts.focusId) || n.props.name === opts.focusId);
   const all = [...ex.nodes.values()];
-  const visible = keep ? all : all.filter((n) => used.has(String(n.id)));
-  const isolated = keep && visible.some((n) => !used.has(String(n.id)));
-  const nodes = visible
+  const visible = keep
+    ? all
+    : all.filter((n) => used.has(String(n.id)) || isFocusNode(n));
+  const visibleByLabel = filters ? visible.filter((n) => filters.labels.has(n.label) || isFocusNode(n)) : visible;
+  const isolated = keep && visibleByLabel.some((n) => !used.has(String(n.id)));
+  let focusVisId = null; // vis id of the expanded node
+  ex.centerNodeId = null;
+  const nodes = visibleByLabel
     .map((n) => {
-      const dim = focusLabels ? !focusLabels.has(n.label) : false;
-      const style = nodeStyle(n, { dim, bold: Boolean(focusLabels) && !dim });
-      if (opts.focusId && (String(n.props.id) === String(opts.focusId) || n.props.name === opts.focusId)) {
-        style.borderWidth = 2.5;
+      const isFocus = isFocusNode(n);
+      if (isFocus) focusVisId = n.id;
+      const style = nodeStyle(n, { dim: false, bold: isFocus });
+      if (isFocus) {
+        style.borderWidth = 3;
         style.color.border = "#e8b04a";
+        if (style.shape === "dot") style.size = Math.max(style.size, 9);
+        else style.font.size = 13;
       }
+      const seeded = positions ? positions.get(String(n.id)) : null;
       return {
         id: n.id,
         label: String(nodeLabel(n.props)).slice(0, 34) || LABEL_FA[n.label] || n.label,
         title: `${LABEL_FA[n.label] || n.label}\n${JSON.stringify(n.props, null, 1).slice(0, 400)}`,
         ...style,
+        // the expanded node is excluded from physics at the origin so the
+        // neighbourhood lays out around it instead of the biggest hub
+        ...(isFocus ? { x: 0, y: 0, physics: false } : seeded ? { x: seeded.x, y: seeded.y } : {}),
       };
     });
-  const edges = [...ex.edges.values()].map((e, i) => ({
+  ex.centerNodeId = focusVisId;
+  const edges = edgesAll.map((e, i) => ({
     id: `e${i}`,
     from: e.from,
     to: e.to,
@@ -151,9 +185,11 @@ function render(opts = {}) {
   // scale repulsion with node count so dense clusters spread out instead of
   // collapsing into a tight ball the fit() then blows up / shrinks
   const spread = Math.max(-320, Math.min(-80, -(45 + nodes.length * 2)));
+  const seededLayout = Boolean(opts.seededLayout && positions && positions.size);
   ex.network = new vis.Network(byId("ex-canvas"), data, {
     autoResize: true,
     physics: {
+      enabled: !seededLayout,
       solver: "forceAtlas2Based",
       forceAtlas2Based: {
         gravitationalConstant: spread,
@@ -167,6 +203,9 @@ function render(opts = {}) {
     },
     interaction: { hover: true, tooltipDelay: 200 },
   });
+  // physics is already off in the seeded branch and stabilization never fires
+  // there, so sync the frozen state/button explicitly
+  if (seededLayout) exSetFrozen(true);
   ex.network.on("click", (params) => {
     if (params.nodes.length) showNodeDetails(String(params.nodes[0]));
     else if (params.edges.length) showEdgeDetails(params.edges[0]);
@@ -181,10 +220,12 @@ function render(opts = {}) {
     }
     ex.network.redraw();
     ex.network.fit({ animation: false });
+    centerOnNode(ex.centerNodeId);
   };
   ex.network.once("stabilizationIterationsDone", () => {
     exSetFrozen(true);
     sizeAndFit();
+    centerOnNode(ex.centerNodeId, true);
   });
   requestAnimationFrame(() => {
     sizeAndFit();
@@ -237,11 +278,12 @@ function showNodeDetails(key) {
     <div class="card"><h4>ویژگی‌ها</h4>${propTable(node.props, textRow)}</div>
     <div class="card">
       <h4>گسترش همسایه‌ها</h4>
-      <div class="ex-row" style="padding:6px 0;border:0">
+      <div class="ex-row ex-row-flat">
         <label>عمق</label>
         <select id="ex-expand-depth"><option>1</option><option>2</option><option>3</option></select>
         <button id="ex-expand" class="primary">گسترش</button>
       </div>
+      <label class="ex-avoid"><input type="checkbox" id="ex-expand-avoid" checked> برای عمق ۲+ از مسیر «قانون اساسی» عبور نکن</label>
       ${ident ? "" : '<div class="muted">این گره شناسه‌ی قابل‌گسترش ندارد.</div>'}
     </div>
     <div class="card"><h4>همسایه‌ها (${neighbors.length})</h4>
@@ -250,7 +292,7 @@ function showNodeDetails(key) {
           const otherKey = String(e.from) === key ? String(e.to) : String(e.from);
           const other = ex.nodes.get(otherKey);
           const dir = String(e.from) === key ? "→" : "←";
-          return `<div class="card" style="cursor:pointer" data-goto="${otherKey}">
+          return `<div class="card ex-neighbor" data-goto="${otherKey}">
             <span class="muted">${dir} ${REL_FA[e.label] || e.label}</span><br>
             ${other ? String(nodeLabel(other.props)).slice(0, 60) : otherKey}</div>`;
         }).join("") || '<div class="muted">همسایه‌ای در نمای فعلی نیست.</div>'}
@@ -258,7 +300,11 @@ function showNodeDetails(key) {
     </div>`;
   const expandBtn = byId("ex-expand");
   if (expandBtn && ident) {
-    expandBtn.onclick = () => expandNode(ident, Number(byId("ex-expand-depth").value));
+    expandBtn.onclick = () => expandNode(
+      ident,
+      Number(byId("ex-expand-depth").value),
+      byId("ex-expand-avoid").checked,
+    );
   }
   if (label === "Provision" && node.props.id) loadProvisionText(node.props.id);
   byId("ex-panel").querySelectorAll("[data-goto]").forEach((el) => {
@@ -305,6 +351,52 @@ function activeRelTypes() {
   return [...document.querySelectorAll("#ex-rels input:checked")]
     .map((i) => i.value)
     .filter((r) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(r)); // whitelist -> safe to inline in the pattern
+}
+
+/* --- live sidebar filter ----------------------------------------------- */
+/* The node/rel checkboxes act as an instant client-side filter over whatever
+   graph is loaded: unchecked types (and edges through them) disappear without
+   a roundtrip. In expand mode the drawer query is rebuilt from the same state
+   so اجرا reproduces the filtered expansion server-side. */
+const checkedLabels = () => new Set(
+  [...document.querySelectorAll("#ex-nodes input:checked")].map((i) => i.value),
+);
+
+function liveFilters() {
+  return { labels: checkedLabels(), rels: new Set(activeRelTypes()) };
+}
+
+function capturePositions() {
+  if (!ex.network) return null;
+  const all = ex.network.getPositions();
+  return new Map(Object.entries(all).map(([k, v]) => [k, { x: v.x, y: v.y }]));
+}
+
+function applyLiveFilters() {
+  if (!ex.network) { syncQueryFromFilters(); return; }
+  const expand = ex.lastExpand;
+  const filters = liveFilters();
+  render({
+    filters,
+    positions: capturePositions(),
+    seededLayout: true,
+    focusId: expand ? expand.ident.value : null,
+  });
+  if (expand) {
+    if (filters.rels.size) {
+      const q = expandQuery(expand.ident, expand.depth, [...filters.rels], expand.avoid, filters.labels);
+      byId("cy-input").value = q;
+      saveQuery(q);
+      ex.lastExpand = { ...expand, query: q }; // اجرا on this text stays in expand mode
+    }
+  } else {
+    syncQueryFromFilters();
+  }
+  const absent = [...filters.labels]
+    .filter((l) => ![...ex.nodes.values()].some((n) => n.label === l))
+    .map((l) => LABEL_FA[l] || l);
+  const hint = absent.length ? ` · در گراف فعلی نیست: ${absent.slice(0, 3).join("، ")}` : "";
+  setStatus(`فیلتر — ${byId("status").textContent}${hint}`);
 }
 
 /* --- Cypher console --------------------------------------------------- */
@@ -394,16 +486,67 @@ function focusNode(id) {
   const node = ex.nodes.get(key);
   if (!node) return;
   showNodeDetails(key);
-  if (ex.network) {
+  if (ex.network && ex.network.getPositions([node.id])[node.id]) {
+    // only pan/select when the node survived the live filter
     ex.network.selectNodes([node.id]);
     ex.network.focus(node.id, { scale: Math.max(ex.network.getScale(), 1), animation: true });
   }
+}
+
+/* --- search ----------------------------------------------------------- */
+const SEARCH_LABEL_FA = { instrument: "قانون", judgment: "رأی", opinion: "نظریه مشورتی" };
+
+function renderSearchResults(results) {
+  const box = byId("ex-search-results");
+  if (!results.length) {
+    box.innerHTML = '<div class="ex-search-empty muted">نتیجه‌ای یافت نشد.</div>';
+    return;
+  }
+  box.innerHTML = "";
+  for (const item of results) {
+    const row = document.createElement("div");
+    row.className = "ex-result";
+    const meta = [item.domain || item.category, item.tier_label].filter(Boolean).join(" · ");
+    row.innerHTML =
+      `<div class="ex-result-head"><span class="ex-result-title">${esc(item.title || item.id)}</span>`
+      + `<span class="ex-result-badge">${esc(SEARCH_LABEL_FA[item.label] || item.label)}</span></div>`
+      + (item.summary ? `<div class="ex-result-summary">${esc(String(item.summary).slice(0, 150))}</div>` : "")
+      + (meta ? `<div class="ex-result-meta">${esc(meta)}</div>` : "");
+    row.onclick = () => { if (typeof window.focusGraphNode === "function") window.focusGraphNode(item.id); };
+    box.append(row);
+  }
+}
+
+async function runSearch() {
+  const input = byId("ex-search-input");
+  const box = byId("ex-search-results");
+  const q = input.value.trim();
+  if (!q) { box.innerHTML = ""; return; }
+  box.innerHTML = '<div class="ex-search-empty muted">در حال جستجو…</div>';
+  try {
+    const data = await api(`/v1/organizations/${ex.org}/graph/search?q=${encodeURIComponent(q)}&limit=15`);
+    renderSearchResults(data.results || []);
+  } catch (error) {
+    box.innerHTML = `<div class="ex-search-empty muted">خطا: ${esc(String(error.message))}</div>`;
+  }
+}
+
+function wireSearch() {
+  const input = byId("ex-search-input");
+  byId("ex-search-btn").onclick = runSearch;
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); runSearch(); }
+  });
+  input.addEventListener("input", () => { if (!input.value.trim()) byId("ex-search-results").innerHTML = ""; });
 }
 
 async function runCypherQuery(query, opts = {}) {
   const q = String(query || "").trim();
   if (!q) { setStatus("کوئری خالی است"); return; }
   const keepIsolates = opts.keepIsolates !== undefined ? opts.keepIsolates : true;
+  // running the exact expansion query keeps expand mode; anything else ends it
+  const expand = ex.lastExpand && q === ex.lastExpand.query ? ex.lastExpand : null;
+  ex.lastExpand = expand;
   setStatus("در حال اجرا…");
   setCyMeta(null);
   ex.nodes.clear(); ex.edges.clear();
@@ -411,13 +554,16 @@ async function runCypherQuery(query, opts = {}) {
     const payload = await cypher(q, {}, 2000);
     for (const row of payload.rows) for (const cell of row) collectCell(cell);
     ex.keepIsolates = keepIsolates;
-    render({ keepIsolates });
+    render(expand
+      ? { keepIsolates, focusId: expand.ident.value, filters: liveFilters() }
+      : { keepIsolates });
     renderTable(payload);
     setCyMeta(payload);
     // a valid query with no graph (counts, projections) → show the table
     if (!ex.nodes.size && (payload.rows || []).length) showCyView("table");
     setStatus(`گره: ${ex.nodes.size} · یال: ${ex.edges.size}`);
-    byId("ex-panel").innerHTML = '<div class="card muted">روی یک گره یا یال کلیک کن…</div>';
+    if (expand && ex.selected) showNodeDetails(ex.selected);
+    else byId("ex-panel").innerHTML = '<div class="card muted">روی یک گره یا یال کلیک کن…</div>';
   } catch (error) {
     setCyMeta(null);
     byId("cy-table").innerHTML = `<div class="cy-error">${esc(String(error.message))}</div>`;
@@ -457,32 +603,63 @@ function wireCypherConsole() {
   byId("cy-input").addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); runFromEditor(); }
   });
-  byId("ex-nodes").addEventListener("change", syncQueryFromFilters);
-  byId("ex-rels").addEventListener("change", syncQueryFromFilters);
+  byId("ex-nodes").addEventListener("change", applyLiveFilters);
+  byId("ex-rels").addEventListener("change", applyLiveFilters);
   byId("ex-limit").addEventListener("change", syncQueryFromFilters);
 }
 
-async function expandNode(ident, depth) {
+/* Build the depth-N expansion query. When avoidConstitution is set (depth >= 2)
+ * the path is written out node-by-node so intermediate nodes can be filtered:
+ * the constitution (tier 1) is a hub, so a plain `*2` traversal reaches almost
+ * everything through it. The predicate keeps only paths that reach distance 2
+ * (or 3) WITHOUT using the constitution as a bridge. */
+function expandQuery(ident, depth, rels, avoidConstitution, labels = null) {
+  const lit = String(ident.value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+  const match = ident.key === "id" ? `n.id = '${lit}'` : `n.name = '${lit}'`;
+  const rel = `-[:${rels.join("|")}]`;
+  // live sidebar filter: only fetch endpoints of the checked node types
+  const labelCond = labels && labels.size
+    ? ` AND labels(m)[0] IN [${[...labels].map((l) => `'${l}'`).join(", ")}]`
+    : "";
+  if (avoidConstitution && depth > 1) {
+    const chain = ["(n)"];
+    const conds = [];
+    for (let i = 1; i < depth; i += 1) {
+      chain.push(`${rel}-(x${i})`);
+      conds.push(`(x${i}.tier IS NULL OR x${i}.tier <> '1')`);
+    }
+    chain.push(`${rel}-(m)`);
+    return `MATCH (n) WHERE ${match}\nMATCH p=${chain.join("")}\nWHERE ${conds.join(" AND ")}${labelCond}\nRETURN p\nLIMIT 800`;
+  }
+  const where = labelCond ? `\nWHERE${labelCond.slice(4)}` : "";
+  return `MATCH (n) WHERE ${match}\nMATCH p=(n)-[:${rels.join("|")}*1..${depth}]-(m)${where}\nRETURN p\nLIMIT 800`;
+}
+
+async function expandNode(ident, depth, avoidConstitution = false) {
   const rels = activeRelTypes();
   if (!rels.length) { setStatus("حداقل یک نوع رابطه انتخاب کن"); return; }
   const d = Math.min(Math.max(Number(depth) || 1, 1), 3);
-  const lit = String(ident.value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-  const match = ident.key === "id" ? `n.id = '${lit}'` : `n.name = '${lit}'`;
-  const q = `MATCH (n) WHERE ${match}\nMATCH p=(n)-[:${rels.join("|")}*1..${d}]-(m)\nRETURN p\nLIMIT 800`;
+  const avoid = Boolean(avoidConstitution) && d > 1;
+  // fetch WITHOUT the label predicate so every type in range lands in memory
+  // and the sidebar checkboxes can toggle it instantly; the drawer text mirrors
+  // the checkbox state instead, so اجرا reproduces the filtered view.
+  const fetchQ = expandQuery(ident, d, rels, avoid);
+  const q = expandQuery(ident, d, rels, avoid, checkedLabels());
   byId("cy-input").value = q;
   saveQuery(q);
   setStatus("گسترش…");
   try {
-    // replace the whole view with this node's depth-N neighbourhood, traversing
-    // only the relationship types currently checked (undirected)
-    const payload = await cypher(q, {}, 2000);
-    const focusLabels = new Set([...document.querySelectorAll("#ex-nodes input:checked")].map((i) => i.value));
+    // replace the whole view with this node's neighbourhood, traversing only
+    // the relationship types currently checked (undirected)
+    const payload = await cypher(fetchQ, {}, 2000);
     ex.nodes.clear(); ex.edges.clear();
     for (const row of payload.rows) collectCell(row[0]);
-    render({ focusLabels, focusId: ident.value });
+    ex.lastExpand = { ident, depth: d, avoid, query: q };
+    render({ focusId: ident.value, filters: liveFilters() });
     renderTable(payload);
     setCyMeta(payload);
-    setStatus(`گسترش عمق ${d}: گره ${ex.nodes.size} · یال ${ex.edges.size}`);
+    const suffix = avoid ? " (بدون مسیر قانون اساسی)" : "";
+    setStatus(`گسترش عمق ${d}${suffix}: گره ${ex.nodes.size} · یال ${ex.edges.size}`);
     showNodeDetails(ex.selected);
   } catch (error) {
     setStatus("خطا: " + String(error.message).slice(0, 120));
@@ -529,30 +706,33 @@ if (window.ResizeObserver) {
     if (!ex.network) return;
     ex.network.redraw();
     ex.network.fit();
+    centerOnNode(ex.centerNodeId);
   }).observe(document.querySelector(".canvas-wrap"));
 }
 
 wireCypherConsole();
-loadMetadata();
+wireSearch();
 
-/* deep-link from the graph page: /ui/explore.html?focus=<instrument_id> */
+/* deep-link from the graph page / live research graph / chat:
+ * /ui/explore.html?focus=<node_id>[&run=1] — load ONLY that node's
+ * neighbourhood (never the whole graph) and center on the node. */
 const urlParams = new URLSearchParams(location.search);
 const focusId = urlParams.get("focus");
-if (urlParams.get("run") === "1") {
-  setTimeout(runGraph, 150);
+const runOnLoad = urlParams.get("run") === "1";
+
+async function bootstrapView() {
+  await loadMetadata();
+  if (focusId) {
+    // expand just this node (respects the checked relationship types) and
+    // pin/center it; fall back to matching by name when the id is unknown.
+    await expandNode({ key: "id", value: focusId }, 1, false);
+    if (!ex.nodes.size) await expandNode({ key: "name", value: focusId }, 1, false);
+    if (!ex.nodes.size) setStatus("گرهی با این شناسه در گراف پیدا نشد");
+  } else if (runOnLoad) {
+    await runGraph();
+  }
 }
-if (focusId) {
-  (async () => {
-    const lit = String(focusId).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-    const q = `MATCH p=(n)-[*1..1]-(m)\nWHERE n.id = '${lit}'\nRETURN p\nLIMIT 400`;
-    byId("cy-input").value = q;
-    saveQuery(q);
-    openDrawer();
-    await runCypherQuery(q, { keepIsolates: false });
-    const entry = [...ex.nodes.entries()].find(([, n]) => String(n.props.id) === String(focusId));
-    if (entry) showNodeDetails(entry[0]);
-  })();
-}
+bootstrapView();
 
 /* راهنمای کاوش گراف (chat.js): focus a node; load its neighbourhood first
  * when it is not part of the current view (same query as the deep link). */
