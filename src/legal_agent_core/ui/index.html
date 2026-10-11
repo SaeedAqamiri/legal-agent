@@ -6,8 +6,9 @@
     <meta name="color-scheme" content="light">
     <meta name="theme-color" content="#173f38">
     <title>رهنما — دستیار پژوهش حقوقی</title>
-    <link rel="stylesheet" href="/ui/styles.css">
-    <script src="/ui/app.js" defer></script>
+    <link rel="stylesheet" href="/ui/styles.css?v=3">
+    <script src="/ui/vendor/vis-network.min.js" defer></script>
+    <script src="/ui/app.js?v=3" defer></script>
   </head>
   <body>
     <div class="app-shell">
@@ -122,10 +123,6 @@
                       <span>شروع پژوهش</span><b aria-hidden="true">←</b>
                     </button>
                   </div>
-                  <div class="live-steps is-hidden" id="live-steps" aria-live="polite">
-                    <div class="section-label">پیشرفت زنده پژوهش</div>
-                    <ol id="live-steps-list"></ol>
-                  </div>
                 </form>
               </div>
 
@@ -139,6 +136,36 @@
                 </ul>
                 <div class="summary-note"><strong>اصل انتشار</strong> ادعای بدون Evidence تأییدشده نمایش داده نمی‌شود.</div>
               </aside>
+            </div>
+
+            <div class="live-stage is-hidden" id="live-stage">
+              <div class="stage-top">
+                <div class="stage-question">
+                  <span class="overline">پژوهش زنده</span>
+                  <p id="stage-question-text">—</p>
+                </div>
+                <div class="stage-meta">
+                  <span class="stage-stat" id="stage-step-count">۰ گام</span>
+                  <span class="stage-stat is-running" id="stage-status"><i aria-hidden="true"></i> در حال اجرا</span>
+                  <button class="secondary-button" id="stage-reset" type="button">پژوهش جدید</button>
+                </div>
+              </div>
+              <div class="stage-grid">
+                <div class="stage-diagram">
+                  <div class="section-label">نمودار گام‌به‌گام پژوهش</div>
+                  <div class="diagram-wrap">
+                    <svg id="live-diagram" viewBox="0 0 1000 560" preserveAspectRatio="xMidYMid meet" role="img" aria-label="نمودار گام‌به‌گام پژوهش زنده"></svg>
+                  </div>
+                  <div class="stage-detail" id="live-step-detail" aria-live="polite">
+                    <div class="detail-placeholder">در انتظار نخستین گام…</div>
+                  </div>
+                </div>
+                <aside class="stage-graph" aria-label="گراف زنده گره‌های در حال استفاده">
+                  <div class="section-label">گراف زنده — گره‌های در حال استفاده</div>
+                  <div class="live-graph-legend" id="live-graph-legend"></div>
+                  <div class="live-graph-canvas" id="live-graph"></div>
+                </aside>
+              </div>
             </div>
 
             <div class="result-area is-hidden" id="result-area" aria-live="polite">

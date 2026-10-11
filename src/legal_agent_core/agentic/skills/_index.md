@@ -8,6 +8,8 @@ fixed by ``LegalResearchTools``).
 - `temporal_version.md` — نسخه‌ی زمانی: واقعه/نسخه، امتناع در نبود نسخه، منع retroactive
 - `cross_reference.md` — زنجیره‌ی ارجاع صریح با get_related
 - `navigate_document.md` — ناوبری درون سند: list/find/read و cite همان که خوانده شد
+- `judicial_precedent.md` — رویه‌ی قضایی: ناوبری از قانون به آرای وحدت رویه/دیوان/نظریات مشورتی
+- `administrative_annulment.md` — اعتبار مقرره و ابطال در دیوان عدالت اداری
 
 ## Routing rule (v1, simple & testable)
 Keyword router picks ONE starting skill per question; the planner may deviate

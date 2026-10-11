@@ -30,7 +30,7 @@ def _build_provider_config(cfg: LLMConfig) -> Any:
     )
 
 
-def _build_profile(cfg: LLMConfig, *, max_output_tokens: int = 2048) -> Any:
+def _build_profile(cfg: LLMConfig, *, max_output_tokens: int = 4096) -> Any:
     from .llm import LLMTask, ModelProfile
 
     return ModelProfile(
@@ -76,23 +76,32 @@ class GraphChatProvider:
             from .adapters import OpenAICompatibleGateway
             from .adapters.postgres import PostgresCanonicalRepository
             from .agentic.graph_chat import GraphChatLoop, GraphChatService
-            from .agentic.graph_tools import GraphTools
+            from .agentic.graph_tools import GraphTools, graph_tool_schemas
             from .agentic.planner import LLMToolPlanner
-            from .law_text import fetch_provision_text
+            from .law_text import fetch_judgment_text, fetch_provision_text
 
             planner = LLMToolPlanner(
                 OpenAICompatibleGateway(),
                 _build_provider_config(cfg),
                 _build_profile(cfg),
+                tools=graph_tool_schemas(),
+                allow_text_answer=True,
             )
-            provision_text = None
+            provision_text = judgment_text = None
             if isinstance(self.canonical, PostgresCanonicalRepository):
                 connection = self.canonical.connection
 
                 def provision_text(provision_id: str) -> dict | None:
                     return fetch_provision_text(connection, provision_id)
 
-            tools = GraphTools(self.laws_graph, provision_text=provision_text)
+                def judgment_text(document_uid: str) -> dict | None:
+                    return fetch_judgment_text(connection, document_uid)
+
+            tools = GraphTools(
+                self.laws_graph,
+                provision_text=provision_text,
+                judgment_text=judgment_text,
+            )
             return GraphChatService(GraphChatLoop(tools, planner))
         except Exception as exc:  # noqa: BLE001 — optional feature must never break boot
             logger.warning("graph chat build failed: %s", exc)

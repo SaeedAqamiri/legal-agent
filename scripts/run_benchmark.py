@@ -206,6 +206,7 @@ def run(
     limit: int | None,
     budgets: dict | None = None,
     shard: tuple[int, int] | None = None,
+    ids: list[str] | None = None,
 ) -> dict:
     budgets = {**DEFAULT_BUDGETS, **(budgets or {})}
     missing = _probe(root)
@@ -215,6 +216,9 @@ def run(
     repository = InMemoryCanonicalRepository()
     document_map = seed_corpus(repository, root / "documents_md", _manifest(root))
     cases = load_golden_cases(root / "benchmark", BENCHMARK_APPLICABLE_TIME)
+    if ids:
+        wanted = {case_id.strip() for case_id in ids if case_id.strip()}
+        cases = tuple(case for case in cases if case.case_id in wanted)
     if categories:
         cases = tuple(case for case in cases if case.category in categories)
     if limit:
@@ -413,6 +417,9 @@ def main() -> int:
         "--strategy", default="navigation", choices=["navigation", "agentic"]
     )
     parser.add_argument("--categories", nargs="*", default=None)
+    parser.add_argument(
+        "--ids", nargs="*", default=None, help="run only these case ids (e.g. Q001 Q014)"
+    )
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(
         "--max-steps", type=int, default=DEFAULT_BUDGETS["max_steps"],
@@ -483,6 +490,7 @@ def main() -> int:
         args.limit,
         budgets,
         shard,
+        args.ids,
     )
     print(json.dumps(report.get("overall", report), ensure_ascii=False, indent=2))
     return 0

@@ -32,6 +32,8 @@ MODEL = os.environ.get("LEGAL_AGENT_LLM_MODEL", "glm-5.3-flash")
 API_TXT = Path("~/api.txt").expanduser()
 KEY_FILE = Path("/tmp/opencode/llm_key")
 PROMPT_VERSION = "instrument-summary-v2-paragraph"
+#: instruments shorter than this many words keep their own text as the summary
+MIN_WORDS = 250
 JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(.+?)```", re.DOTALL)
 
 SYSTEM_PROMPT = (
@@ -79,7 +81,8 @@ def llm_summary(key: str, prompt: str, retries: int = 5) -> str:
         ],
     }
     if "z.ai" in BASE_URL:
-        payload["thinking"] = {"type": "disabled"}
+        # reasoning on medium effort (user spec: never disabled, never max)
+        payload["thinking"] = {"type": "enabled", "effort": "medium"}
     last: Exception | None = None
     for attempt in range(retries):
         try:
@@ -107,23 +110,41 @@ def main() -> int:
         "LEGAL_AGENT_POSTGRES_DSN", "postgresql://legal_agent:legal_agent@localhost:5432/legal_agent"))
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--instrument", default=None, help="summarize only this instrument_id")
     args = parser.parse_args()
 
     key = api_key()
     db = psycopg.connect(args.dsn, autocommit=True)
-    condition = "" if args.force else (
-        "AND NOT EXISTS (SELECT 1 FROM canonical.instrument_summaries s "
-        "WHERE s.instrument_id = i.instrument_id)"
-    )
+    if args.instrument:
+        # a targeted re-run always regenerates the listed instruments' summaries
+        ids = [x.strip() for x in args.instrument.split(",") if x.strip()]
+        condition = "AND i.instrument_id = ANY(%s)"
+        params: tuple = (ids,)
+    else:
+        condition = "" if args.force else (
+            "AND NOT EXISTS (SELECT 1 FROM canonical.instrument_summaries s "
+            "WHERE s.instrument_id = i.instrument_id)"
+        )
+        params = ()
     rows = db.execute(
         f"""SELECT i.instrument_id, i.title, COALESCE(i.subject_domain,''),
                    COALESCE(i.authority_level,''),
                    (SELECT string_agg(ps.summary, ' | ')
                       FROM canonical.provision_summaries ps
-                     WHERE ps.instrument_id = i.instrument_id)
+                     WHERE ps.instrument_id = i.instrument_id),
+                   (SELECT string_agg(COALESCE(pv.normalized_text, pv.text, ''), ' ')
+                      FROM canonical.provisions p
+                      LEFT JOIN LATERAL (
+                           SELECT normalized_text, text
+                             FROM canonical.provision_versions v
+                            WHERE v.provision_id = p.provision_id
+                            ORDER BY v.provision_version_id LIMIT 1
+                      ) pv ON true
+                     WHERE p.instrument_id = i.instrument_id)
               FROM canonical.legal_instruments i
              WHERE TRUE {condition}
-             ORDER BY i.instrument_id"""
+             ORDER BY i.instrument_id""",
+        params,
     ).fetchall()
     log(f"{len(rows)} instruments to summarize (model={MODEL}, workers={args.workers})")
 
@@ -138,7 +159,11 @@ def main() -> int:
         return "\n".join(lines)
 
     def work(row):
-        instrument_id, title, domain, tier, prov_summaries = row
+        instrument_id, title, domain, tier, prov_summaries, full_text = row
+        full_text = (full_text or "").strip()
+        # short instruments: their own text IS the summary (no LLM call)
+        if full_text and len(full_text.split()) < MIN_WORDS:
+            return instrument_id, full_text[:4000]
         return instrument_id, llm_summary(key, build_prompt(title, domain, tier, prov_summaries))
 
     done = failed = 0

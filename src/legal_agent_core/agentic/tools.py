@@ -19,6 +19,12 @@ from .envelope import Envelope, RefStore, ToolStatus, empty_envelope, make_envel
 
 EXCERPT_CHARS = 280
 
+#: Query tokens that mark the query as an article/paragraph reference
+#: («ماده ۳۶۵ قانون مدنی»). Only then does the exact-number boost apply.
+_ARTICLE_REFERENCE_TOKENS = frozenset(
+    {"ماده", "مادهٔ", "تبصره", "بند", "اصل", "فصل", "باب"}
+)
+
 
 class ToolArgumentError(DomainError):
     """A planner-supplied tool argument failed strict validation."""
@@ -265,7 +271,19 @@ class LegalResearchTools:
                 )
             )
             metadata = _overlap(query_tokens, search_tokens(metadata_text))
+            # «ماده ۳۶۵ قانون مدنی» must surface that article even though its
+            # text shares no token with the query. The boost applies ONLY to
+            # article-style queries: a bare number like «۱۴۰ ماه سابقه» is a
+            # fact, not a provision reference, and boosting it floods the
+            # ranking with unrelated provisions numbered 140.
+            number_tokens = search_tokens(provision.number or "")
+            references_article = bool(query_tokens & _ARTICLE_REFERENCE_TOKENS)
+            exact_number = (
+                references_article and bool(number_tokens) and number_tokens <= query_tokens
+            )
             score = 0.8 * lexical + 0.2 * metadata
+            if exact_number:
+                score += 1.0
             if score <= 0:
                 continue
             versions[version.provision_version_id] = (version, provision, instrument)
@@ -1466,6 +1484,13 @@ class LegalResearchTools:
             return None, False
         if ranks is None:
             return None, False
+        if not ranks:
+            # The text-only prefilter cannot see metadata (label/number/
+            # instrument title): a query like «ماده ۳۶۵ قانون مدنی» matches a
+            # provision whose *text* shares no token, so an empty result may
+            # still have metadata matches. Fall back to the exhaustive scan to
+            # keep recall correct (the exact scoring below stays authoritative).
+            return None, False
         return set(ranks), True
 
     def _resolve_document_versions(
@@ -1678,6 +1703,7 @@ class LegalResearchTools:
             "source_span_id": span.source_span_id,
             "label": provision.label,
             "number": provision.number,
+            "instrument_id": instrument.instrument_id,
             "instrument_title": instrument.title,
             "status": version.status.value,
             "effective_from": _iso(version.effective_from),

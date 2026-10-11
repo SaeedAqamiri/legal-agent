@@ -363,7 +363,9 @@ class ResearchApplicationService:
             return self.navigation
         if self.agentic is None:
             raise DomainError("agentic research strategy is not configured")
-        return self.agentic
+        # A provider exposes ``.loop`` and rebuilds it from the live settings;
+        # a plain loop object is returned unchanged (tests/demo).
+        return getattr(self.agentic, "loop", self.agentic)
 
 
 @dataclass(frozen=True, slots=True)

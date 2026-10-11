@@ -140,12 +140,19 @@ class CanonicalIngestionPipeline:
             parsed.instrument.title,
             *parsed.instrument.aliases,
         )
+        # Catalog of known instrument titles so «ماده N قانون X» mentions keep
+        # the target-law name in target_text (resolved later at law level).
+        try:
+            known_titles = self.repository.list_instrument_titles()
+        except Exception:  # noqa: BLE001 — catalog is an optimization, never a blocker
+            known_titles = ()
         for item in ingested:
             mentions = self.reference_extractor.extract(
                 item.version.normalized_text,
                 article_targets=article_targets,
                 instrument_aliases=aliases,
                 source_provision_id=item.provision.provision_id,
+                known_titles=known_titles,
             )
             for mention in mentions:
                 reference_id = stable_id(

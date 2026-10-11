@@ -18,7 +18,6 @@ from typing import Any
 
 from fastapi import FastAPI
 
-from .agentic import LegalResearchTools, ToolResearchLoop
 from .answering import CitationPipeline
 from .api import APIContainer, OIDCProvider, create_app
 from .application import (
@@ -26,7 +25,7 @@ from .application import (
     KnowledgeReviewApplicationService,
     ResearchApplicationService,
 )
-from .demo import _canonical_data, _DemoComposer, _DemoToolPlanner
+from .demo import _canonical_data, _DemoComposer
 from .errors import DomainError, NotFoundError
 from .evaluation import EvaluationRunner
 from .in_memory import InMemoryResearchGraphRepository
@@ -358,6 +357,74 @@ def _agentic_extras(settings: Settings, canonical: Any) -> dict[str, Any]:
     return extras
 
 
+def _connect_laws_graph(settings: Settings) -> Any:
+    """Open the shared FalkorDB laws projection (best-effort at boot)."""
+    if not settings.falkor.enabled:
+        return None
+    from .adapters.falkordb import connect_laws_graph
+
+    try:
+        return connect_laws_graph(settings.falkor.url)
+    except Exception:  # noqa: BLE001 — projection is optional at boot
+        return None
+
+
+def _research_agent_provider(
+    settings: Settings, canonical: Any, research_graph: Any, laws_graph: Any
+) -> Any:
+    """Build the runtime-configurable research agent (canonical + graph tools)."""
+    from .adapters.postgres import PostgresCanonicalRepository
+    from .agentic import LegalResearchTools
+    from .agentic.graph_tools import GraphTools
+    from .law_text import fetch_judgment_text, fetch_provision_text
+    from .research_agent_provider import ResearchAgentProvider
+    from .runtime_settings import LLMSettingsStore, default_settings_path
+    from .verification import EvidenceVerifier
+
+    canonical_tools = LegalResearchTools(
+        canonical,
+        research_graph,
+        structure_summaries=_structure_summaries(settings),
+        **_agentic_extras(settings, canonical),
+    )
+    graph_tools = None
+    if laws_graph is not None:
+        provision_text = judgment_text = None
+        if isinstance(canonical, PostgresCanonicalRepository):
+            connection = canonical.connection
+
+            def provision_text(provision_id: str) -> dict | None:  # type: ignore[misc]
+                return fetch_provision_text(connection, provision_id)
+
+            def judgment_text(document_uid: str) -> dict | None:  # type: ignore[misc]
+                return fetch_judgment_text(connection, document_uid)
+
+        graph_tools = GraphTools(
+            laws_graph,
+            provision_text=provision_text,
+            judgment_text=judgment_text,
+        )
+    return ResearchAgentProvider(
+        canonical_tools,
+        EvidenceVerifier(canonical),
+        LLMSettingsStore(default_settings_path()),
+        graph_tools=graph_tools,
+        config=_agentic_config(),
+    )
+
+
+def _agentic_config() -> Any:
+    """Production research budget (reading rulings is token-heavy)."""
+    from .agentic.loop import AgenticConfig
+
+    return AgenticConfig(
+        max_steps=16,
+        wall_seconds=300.0,
+        max_total_tokens=150_000,
+        recent_full_steps=2,
+    )
+
+
 def _graph_chat_provider(settings: Settings, laws_graph: Any, canonical: Any = None) -> Any:
     """Runtime-configurable graph-guide chat agent over the laws projection.
 
@@ -380,6 +447,9 @@ def create_app_from_env(settings: Settings | None = None) -> FastAPI:
     authorization = AuthorizationService()
     metrics = MetricsRegistry()
     identifiers = count(1)
+    # Connect the laws mirror before building the research agent so its graph
+    # tools can navigate the projection from the first run.
+    laws_graph = _connect_laws_graph(settings)
     start_laws_mirror_sync(settings)
 
     research = ResearchApplicationService(
@@ -394,16 +464,7 @@ def create_app_from_env(settings: Settings | None = None) -> FastAPI:
         authorization,
         metrics,
         id_factory=lambda: f"req-{next(identifiers)}",
-        agentic=ToolResearchLoop(
-            LegalResearchTools(
-                canonical,
-                graph,
-                structure_summaries=_structure_summaries(settings),
-                **_agentic_extras(settings, canonical),
-            ),
-            _DemoToolPlanner(),
-            EvidenceVerifier(canonical),
-        ),
+        agentic=_research_agent_provider(settings, canonical, graph, laws_graph),
     )
     memory = _seed_graph_memory(graph, settings.default_organization_id, canonical)
     reviews = KnowledgeReviewApplicationService(memory, authorization, metrics)
@@ -451,15 +512,6 @@ def create_app_from_env(settings: Settings | None = None) -> FastAPI:
             Role.ADMIN,
         }),
     )
-
-    laws_graph = None
-    if settings.falkor.enabled:
-        from .adapters.falkordb import connect_laws_graph
-
-        try:
-            laws_graph = connect_laws_graph(settings.falkor.url)
-        except Exception:  # noqa: BLE001 — projection is optional at boot
-            laws_graph = None
 
     graph_chat = _graph_chat_provider(settings, laws_graph, canonical)
 

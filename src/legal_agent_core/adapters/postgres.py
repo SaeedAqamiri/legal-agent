@@ -350,6 +350,18 @@ class PostgresCanonicalRepository(CanonicalRepository):
         )
         return LegalInstrument(row[0], row[1], row[2], InstrumentType(row[3]), row[4], *row[5:])
 
+    def list_instrument_titles(self) -> tuple[str, ...]:
+        rows = self._fetchall(
+            "SELECT canonical_title, title FROM canonical.legal_instruments"
+        )
+        titles: set[str] = set()
+        for canonical_title, title in rows:
+            if canonical_title:
+                titles.add(canonical_title)
+            if title:
+                titles.add(title)
+        return tuple(titles)
+
     def get_source_document(self, source_document_id: str) -> SourceDocument:
         row = self._required_row(
             """

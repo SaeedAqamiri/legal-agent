@@ -301,7 +301,10 @@ class ToolResearchLoopTests(unittest.TestCase):
         )
         self.assertTrue(published.citations)
 
-    def test_citing_unknown_evidence_fails_verification_then_recovers(self) -> None:
+    def test_citing_unknown_evidence_is_caught_before_verification_then_recovers(self) -> None:
+        # Citing ids that never entered the ledger (e.g. a graph node id) is now
+        # caught as a contract error with actionable feedback, instead of
+        # bouncing through a verification rejection.
         planner = ScriptedPlanner(
             [
                 PlannerDecision(
@@ -329,7 +332,7 @@ class ToolResearchLoopTests(unittest.TestCase):
         )
         outcome = _run(_loop(self.repository, planner, max_steps=4))
         self.assertTrue(outcome.completed)
-        self.assertIn("unknown_evidence", planner.prompts[1][1])
+        self.assertIn("unknown evidence ids", planner.prompts[1][1])
 
     def test_blank_question_is_rejected(self) -> None:
         loop = _loop(self.repository, ScriptedPlanner([]))

@@ -17,7 +17,7 @@ from typing import Any
 
 from ..errors import DomainError
 from .envelope import RefStore, ToolStatus
-from .graph_tools import GraphTools
+from .graph_tools import GraphTools, harvest_refs
 from .loop import ToolCallTrace
 from .planner import PlannerTurn, ToolPlanner, parse_node_refs
 
@@ -38,33 +38,25 @@ SUBORDINATE_TO، EXPLICITLY_REFERENCES، AMENDS، REPEALS، IMPLEMENTS
 
 ## قواعد
 ۱. هر عدد و نامی فقط از خروجی ابزارها؛ هیچ شمارش یا شناسه‌ای از خودت نساز.
-۲. پیش از هر پاسخ حداقل یک ابزار صدا بزن؛ برای «چند تا» از graph_stats، برای «فلان قانون/ماده/رأی» \
-اول find_nodes (شناسه گره لازم داری)، برای «چه چیزی به فلان وصل است» node_neighbors و برای \
-«رابطه بین دو چیز» find_paths. اگر هیچ‌کدام کافی نبود run_cypher (فقط MATCH/RETURN).
+۲. ابزارها را با «فراخوانی تابع» (tool call) صدا بزن؛ برای «چند تا» از graph_stats، برای \
+«فلان قانون/ماده/رأی» اول find_nodes (شناسه گره لازم داری)، برای «چه چیزی به فلان وصل است» \
+node_neighbors و برای «رابطه بین دو چیز» find_paths. اگر هیچ‌کدام کافی نبود run_cypher (فقط MATCH/RETURN).
 ۳. گردش‌کار موضوع (مثل «قوانین مربوط به محیط زیست را بیار») ناوبری روی درخت است، نه شباهت‌یابی:
    الف) search_laws(موضوع) → قوانین مرتبط همراه «خلاصه‌ی» هرکدام؛ خلاصه‌ها را بخوان و مرتبط‌بودن را خودت بسنج.
    ب) برای یک قانونِ مشخص، list_provisions(instrument_id, موضوع) → مواد با خلاصه‌شان.
    ج) برای متن دقیق یک ماده، get_provision_text(provision_id) (گراف فقط برچسب/خلاصه دارد؛ متن از canonical می‌آید).
-   د) اگر خلاصه‌ی ماده‌ای موجود نبود، با شماره/برچسب ماده قضاوت کن و در صورت نیاز متنش را بخوان.
+   د) برای رویه‌ی قضایی: judgments_for_law(قانون) یا search_judgments(موضوع) و سپس get_judgment_text(judgment_id).
 ۴. پاسخ فارسی، کوتاه و گفت‌وگویی؛ اعداد را با جداکننده بنویس و منبعِ عدد (کدام ابزار) را ضمنی روشن کن. \
 اگر نتیجه EMPTY بود صادقانه بگو یافت نشد و پیشنهاد بعدی بده؛ حدس ممنوع.
-۵. فیلد nodes الزامی است: شناسهٔ گره‌های اصلیِ پاسخ را (۱ تا ۸ مورد، با id دقیقاً همان که ابزار برگردانده) \
-برگردان تا در UI کلیک‌پذیر شوند — وقتی چند قانون/ماده را نام می‌بری، شناسه‌شان را هم بیاور: \
-{{"id": "...", "label": "instrument|provision|judgment|opinion|authority|domain", "title": "..."}}.
+۵. مهم: به‌محض آنکه اطلاعات برای پاسخ کافی شد، دیگر هیچ ابزاری صدا نزن و پاسخ نهایی را \
+به‌صورت متن فارسی بنویس.
 ۶. پرسش مبهم را با یک فرض روشن جلو ببر؛ برای شمارش دقیق ابتدا تعریفت را در یک جمله بگو.
-۷. بودجه: {budget_steps} فراخوانی ابزار در هر نوبت؛ به‌محض پاسخ‌پذیری، پاسخ بده.
-
-## ابزارها
-{tool_catalog}
-
-## قرارداد خروجی — دقیقاً یک شیء JSON:
-فراخوانی ابزار: {{"action":"tool","tool":"نام","args":{{...}},"thought":"..."}}
-پاسخ نهایی: {{"action":"answer","answer":"متن فارسی","nodes":[{{"id":"...","label":"...","title":"..."}}]}}
+۷. بودجه: {budget_steps} فراخوانی ابزار در هر نوبت؛ در آخرین گام باید پاسخ نهایی را بنویسی.
 """
 
 _CONTRACT_REMINDER = (
-    "یادآوری قرارداد: فقط یک شیء JSON برگردان — "
-    '{"action":"tool",...} یا {"action":"answer","answer":"...","nodes":[...]}.'
+    "یادآوری: یا یک ابزار را با tool call صدا بزن، یا اگر اطلاعات کافی است پاسخ نهایی را "
+    "به‌صورت متن فارسی بنویس."
 )
 
 _FALLBACK_ANSWER = (
@@ -79,9 +71,9 @@ _PLANNER_FAILURE_ANSWER = (
 
 @dataclass(frozen=True, slots=True)
 class GraphChatConfig:
-    max_steps: int = 8
-    wall_seconds: float = 90.0
-    max_total_tokens: int = 40_000
+    max_steps: int = 6
+    wall_seconds: float = 300.0
+    max_total_tokens: int = 150_000
     #: Previous user/assistant turns kept verbatim in the transcript.
     history_turns: int = 8
 
@@ -161,7 +153,13 @@ class GraphChatLoop:
         deadline = time.monotonic() + self.config.wall_seconds
 
         for step in range(1, self.config.max_steps + 1):
-            turn = self._call_planner(system_prompt, message, history, state)
+            turn = self._call_planner(
+                system_prompt,
+                message,
+                history,
+                state,
+                force_answer=step >= self.config.max_steps,
+            )
             if turn is None:
                 return GraphChatResult(
                     _PLANNER_FAILURE_ANSWER, (), tuple(state.trace), False
@@ -227,13 +225,14 @@ class GraphChatLoop:
             state.consecutive_empty += 1
         else:
             state.consecutive_empty = 0
+        nodes, edges = harvest_refs(tool, envelope, args)
         if envelope.status not in (
             ToolStatus.EMPTY,
             ToolStatus.ERROR,
             ToolStatus.NOT_FOUND,
         ):
             known = {ref["id"] for ref in state.node_candidates}
-            for ref in _harvest_node_refs(tool, envelope):
+            for ref in nodes:
                 if ref["id"] not in known:
                     state.node_candidates.append(ref)
                     known.add(ref["id"])
@@ -265,6 +264,9 @@ class GraphChatLoop:
                 "total_count": envelope.total_count,
                 "complete": envelope.complete,
                 "latency_ms": latency,
+                "cypher": envelope.meta.get("cypher"),
+                "nodes": nodes,
+                "edges": edges,
             },
         )
 
@@ -274,11 +276,20 @@ class GraphChatLoop:
         message: str,
         history: Sequence[dict[str, str]],
         state: _TurnState,
+        *,
+        force_answer: bool = False,
     ) -> PlannerTurn | None:
         transcript = self._transcript(message, history, state)
+        if force_answer:
+            transcript += (
+                "\n\nاین آخرین گام است؛ دیگر ابزاری صدا نزن و همین حالا پاسخ نهایی را "
+                "به‌صورت متن فارسی بنویس."
+            )
         for attempt in range(2):
             try:
-                return self.planner.decide(system_prompt, transcript)
+                return self.planner.decide(
+                    system_prompt, transcript, force_answer=force_answer
+                )
             except DomainError:
                 if attempt == 0:
                     time.sleep(0.5)
@@ -314,10 +325,7 @@ class GraphChatLoop:
         return "\n\n".join(parts)
 
     def _system_prompt(self) -> str:
-        return _SYSTEM_TEMPLATE.format(
-            budget_steps=self.config.max_steps,
-            tool_catalog=self.tools.tool_catalog(),
-        )
+        return _SYSTEM_TEMPLATE.format(budget_steps=self.config.max_steps)
 
 
 class GraphChatService:
@@ -352,35 +360,6 @@ def _emit(progress: Callable[[dict], None] | None, event: dict) -> None:
 
 
 #: Node type to assume for tools whose result items lack a graph label.
-_NODE_LABEL_DEFAULTS = {
-    "search_laws": "instrument",
-    "list_provisions": "provision",
-    "get_provision_text": "provision",
-}
-
-
-def _harvest_node_refs(tool: str, envelope: Any) -> list[dict[str, Any]]:
-    """Extract clickable node refs from a tool envelope (best-effort)."""
-    default_label = _NODE_LABEL_DEFAULTS.get(tool)
-    refs: list[dict[str, Any]] = []
-    for item in envelope.items:
-        if not isinstance(item, dict):
-            continue
-        node_id = item.get("id")
-        if not isinstance(node_id, str) or not node_id:
-            continue
-        if default_label is not None:
-            label = default_label
-            title = item.get("title") or item.get("label") or item.get("number") or node_id
-        else:
-            label = item.get("label")
-            if not isinstance(label, str) or not label:
-                continue
-            title = item.get("title") or item.get("label") or node_id
-        refs.append({"id": node_id, "label": label, "title": str(title)})
-    return refs
-
-
 __all__ = [
     "GraphChatConfig",
     "GraphChatLoop",

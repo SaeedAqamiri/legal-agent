@@ -18,6 +18,7 @@ from ..llm import (
     ProviderConfig,
     ProviderResponse,
     TokenUsage,
+    ToolCall,
 )
 
 
@@ -193,6 +194,9 @@ class OpenAICompatibleGateway:
             ],
             "max_tokens": profile.max_output_tokens,
         }
+        if request.tools:
+            payload["tools"] = [dict(tool) for tool in request.tools]
+            payload["tool_choice"] = request.tool_choice or "auto"
         if profile.temperature is not None:
             payload["temperature"] = profile.temperature
         if request.structured_output:
@@ -221,6 +225,9 @@ class OpenAICompatibleGateway:
         if not isinstance(response_id, str) or not response_id.strip():
             raise LLMResponseFormatError("LLM provider response is missing id")
         text = cls._responses_text(body) if style == EndpointStyle.RESPONSES else cls._chat_text(body)
+        tool_calls = cls._chat_tool_calls(body) if style == EndpointStyle.CHAT_COMPLETIONS else ()
+        if not text.strip() and not tool_calls:
+            raise LLMResponseFormatError("chat completion contains no text")
         model = body.get("model")
         usage = body.get("usage")
         return ProviderResponse(
@@ -229,6 +236,7 @@ class OpenAICompatibleGateway:
             text=text,
             usage=cls._usage(usage, style),
             request_id=cls._header(response.headers, "x-request-id"),
+            tool_calls=tool_calls,
         )
 
     @staticmethod
@@ -275,7 +283,41 @@ class OpenAICompatibleGateway:
             text = "".join(parts)
             if text.strip():
                 return text
-        raise LLMResponseFormatError("chat completion contains no text")
+        return ""
+
+    @staticmethod
+    def _chat_tool_calls(body: Mapping[str, Any]) -> tuple[ToolCall, ...]:
+        choices = body.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], Mapping):
+            return ()
+        message = choices[0].get("message")
+        if not isinstance(message, Mapping):
+            return ()
+        raw = message.get("tool_calls")
+        if not isinstance(raw, list):
+            return ()
+        calls: list[ToolCall] = []
+        for item in raw:
+            if not isinstance(item, Mapping):
+                continue
+            function = item.get("function")
+            if not isinstance(function, Mapping):
+                continue
+            name = function.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            arguments = function.get("arguments")
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments if arguments is not None else {})
+            call_id = item.get("id")
+            calls.append(
+                ToolCall(
+                    name=name.strip(),
+                    arguments=arguments,
+                    id=call_id if isinstance(call_id, str) else "",
+                )
+            )
+        return tuple(calls)
 
     @staticmethod
     def _usage(value: object, style: EndpointStyle) -> TokenUsage:

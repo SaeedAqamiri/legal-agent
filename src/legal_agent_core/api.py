@@ -464,6 +464,9 @@ def create_app(container: APIContainer) -> FastAPI:
                 conversation_id=payload.conversation_id,
                 strategy=ResearchStrategy(payload.strategy),
             )
+            #: Progress frames are kept so a saved episode can replay its live
+            #: diagram/graph when reopened from history (see GET research/{id}).
+            live_events: list[dict] = []
             try:
                 for event in container.research.stream_events(principal, command):
                     if event.get("type") == "completed":
@@ -472,11 +475,13 @@ def create_app(container: APIContainer) -> FastAPI:
                         history.save(
                             record.organization_id,
                             record.outcome.episode.episode_id,
-                            body,
+                            {**body, "live": live_events[-200:]},
                         )
                         yield _sse_frame({"type": "result", "data": body})
                         yield "event: done\ndata: {}\n\n"
                     else:
+                        if len(live_events) < 200:
+                            live_events.append(event)
                         yield _sse_frame(event)
             except DomainError as exc:
                 yield _sse_frame({"type": "failed", "message": str(exc)})
@@ -860,6 +865,40 @@ def create_app(container: APIContainer) -> FastAPI:
                 "provisions": provisions_total,
             },
         }
+
+    @app.get(
+        "/v1/organizations/{organization_id}/graph/search",
+        tags=["graph"],
+    )
+    def search_graph_nodes(
+        organization_id: str,
+        principal: CurrentPrincipal,
+        q: str,
+        limit: int = 15,
+    ) -> dict[str, Any]:
+        """Ranked keyword search over the FalkorDB laws projection.
+
+        Backs the explore-page search box: returns the most relevant
+        instruments/judgments/opinions (with a one-line summary) so a result
+        can be clicked to focus its node in the graph.
+        """
+        container.authorization.require(
+            principal, Permission.READ_LIBRARY, organization_id
+        )
+        graph = container.laws_graph
+        if graph is None:
+            raise DomainError(
+                "graph search requires the FalkorDB laws projection "
+                "(FALKORDB_URL unset)"
+            )
+        from .agentic.graph_tools import search_graph
+
+        query = q.strip()
+        if not query:
+            return {"query": q, "results": [], "count": 0}
+        limit = max(1, min(limit, 50))
+        results = search_graph(graph, query, limit=limit)
+        return {"query": query, "results": results, "count": len(results)}
 
     @app.post(
         "/v1/organizations/{organization_id}/graph/cypher",

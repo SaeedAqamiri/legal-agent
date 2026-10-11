@@ -12,7 +12,7 @@ import hashlib
 import json
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import StrEnum
 from typing import Any
@@ -31,6 +31,7 @@ from ..verification import (
     VerificationReport,
 )
 from .envelope import RefStore, ToolStatus
+from .graph_tools import harvest_refs
 from .planner import PlannerTurn, ToolPlanner
 from .skill_router import augment_system_prompt, skills_index
 from .tools import LegalResearchTools, ToolArgumentError
@@ -66,8 +67,20 @@ _SYSTEM_TEMPLATE = """شما ایجنت پژوهش حقوقی فقط-خواند�
    مفقود است. امتناع بدون این جست‌وجوها پذیرفته نیست. حدس و دانش بیرونی همیشه ممنوع است.
    برای واقعه‌ی تاریخی (سال Y): با list_documents(applicable_time=تاریخ واقعه) کنترل کن
    آیا منبع هم‌دوره در مجموعه هست؛ نبودِ منبع هم‌دوره = امتناعِ مستند با همین استدلال.
-۸. به‌محض پاسخ‌پذیر بودن پرسش، پاسخ نهایی را بده. بودجه: {budget_steps} فراخوانی ابزار/گام.
-۹. ابزارهای موجود:
+۸. به‌محض پاسخ‌پذیر بودن پرسش، پاسخ نهایی بده؛ ادامه‌ی جست‌وجو پس از کفایت ممنوع.
+   EMPTY پیاپی یعنی همان کوئری را تکرار نکن — سند یا واژگان حقوقی متفاوت امتحان کن.
+   بودجه: {budget_steps} فراخوانی ابزار/گام.
+۹. لایه‌ی قضایی: وقتی قانون/ماده‌ی حاکم را یافتی و پرسش به اجرای عملی، تعارض آرا،
+   یا اعتبار/ابطال مقرره مربوط است، با judgments_for_law روی همان قانون آرای وحدت
+   رویه/دیوان و نظریات مشورتی مرتبط را ببین (یا با search_judgments موضوع را مستقیم
+   جست‌وجو کن) و خلاصه/متن رأی را با get_judgment_text بخوان. رأی در استدلال می‌آید
+   ولی ادعاها همچنان باید به evidence ماده مستند بمانند؛ لازم‌الاتباع (رأی وحدت رویه/
+   هیئت عمومی) را از متقاعدکننده (نظریه مشورتی/رویه‌ی قضایی) جدا کن.
+   مهم: شناسهٔ گره‌های گراف، document_uid رأی و provision_id هرگز evidence_id نیستند؛
+   فقط مقدار فیلد evidence_id در خروجی ابزارهای کانونیکال شاهد است. اگر رأی به ماده‌ی
+   X قانون Y استناد کرده (cited_laws)، همان ماده را با search_provisions پیدا کن و
+   evidence_id آن را شاهد قرار بده؛ خودِ رأی را فقط در متن پاسخ نام ببر.
+۱۰. ابزارهای موجود:
 {tool_catalog}
 {skills_index}
 
@@ -212,7 +225,9 @@ class ToolResearchLoop:
         dispositions: set[tuple[str, EvidenceDisposition]] = set()
 
         for step in range(1, self.config.max_steps + 1):
-            turn = self._call_planner(system_prompt, question, applicable_time, state, episode)
+            turn = self._call_planner(
+                system_prompt, question, applicable_time, state, episode, ledger
+            )
             if turn is None:
                 break
             state.last_turn = turn
@@ -268,6 +283,7 @@ class ToolResearchLoop:
                     episode,
                     ledger,
                     progress,
+                    thought=decision.thought,
                 )
                 if state.consecutive_empty >= 3 and state.consecutive_empty % 3 == 0:
                     state.steps.append(
@@ -305,6 +321,52 @@ class ToolResearchLoop:
                         )
                     )
                     continue
+                # Only evidence ids that actually entered the ledger can back a
+                # claim. Models routinely cite graph node ids (a judgment's
+                # document_uid) or stale ids; dropping those here and feeding
+                # the mistake back avoids a wasted verification-rejection loop.
+                known_ids = {entry.evidence.evidence_id for entry in ledger.entries}
+                filtered: list[AnswerClaim] = []
+                unknown: set[str] = set()
+                for claim in claims:
+                    if not claim.evidence_ids:
+                        # No evidence at all: leave it for the unevidenced-claim
+                        # handling below (keeps the honest dropped-claims signal).
+                        filtered.append(claim)
+                        continue
+                    valid = tuple(eid for eid in claim.evidence_ids if eid in known_ids)
+                    unknown |= set(claim.evidence_ids) - set(valid)
+                    if valid:
+                        filtered.append(replace(claim, evidence_ids=valid))
+                if unknown and not filtered:
+                    state.steps.append(
+                        _StepRecord(
+                            step,
+                            "contract_error",
+                            "CONTRACT-ERROR: unknown evidence ids — این شناسه‌ها evidence_id "
+                            "معتبر نیستند (در دفتر شواهد نیستند): "
+                            + ", ".join(sorted(unknown)[:8])
+                            + "\nشناسهٔ گره‌های گراف، document_uid آرا و provision_id شاهد "
+                            "نیستند؛ فقط مقدار فیلد evidence_id در خروجی ابزارهای کانونیکال "
+                            "(search_provisions/read_span/...) معتبر است. برای پرسش مبتنی بر رأی، "
+                            "مواد قانونی که رأی به آن‌ها استناد کرده (cited_laws) را با "
+                            "search_provisions پیدا کن و همان‌ها را شاهد قرار بده.\n"
+                            + _CONTRACT_REMINDER,
+                            summary="CONTRACT-ERROR: unknown evidence ids",
+                        )
+                    )
+                    _emit(
+                        progress,
+                        {
+                            "type": "contract_error",
+                            "step": step,
+                            "message": "unknown evidence ids",
+                        },
+                    )
+                    continue
+                if unknown:
+                    episode.identified_issues.append("dropped_unknown_evidence_ids")
+                claims = tuple(filtered)
                 # A claim without evidence can never be published, so drop it
                 # here instead of letting the publish gate crash the run. The
                 # dropped text stays in the answer body.
@@ -423,6 +485,7 @@ class ToolResearchLoop:
         episode: ResearchEpisode,
         ledger: EvidenceLedger,
         progress: Callable[[dict], None] | None = None,
+        thought: str | None = None,
     ) -> None:
         started = time.monotonic()
         try:
@@ -459,6 +522,7 @@ class ToolResearchLoop:
             return
         latency = int((time.monotonic() - started) * 1000)
         envelope = result.envelope
+        nodes, edges = harvest_refs(tool, envelope, args)
         if envelope.status is ToolStatus.EMPTY:
             state.consecutive_empty += 1
         else:
@@ -501,6 +565,7 @@ class ToolResearchLoop:
                 "step": step,
                 "tool": tool,
                 "args": dict(args),
+                "thought": thought,
                 "ok": True,
                 "status": envelope.status.value,
                 "total_count": envelope.total_count,
@@ -508,6 +573,9 @@ class ToolResearchLoop:
                 "complete": envelope.complete,
                 "latency_ms": latency,
                 "evidence_count": len(result.evidence),
+                "cypher": envelope.meta.get("cypher"),
+                "nodes": nodes,
+                "edges": edges,
             },
         )
 
@@ -534,6 +602,23 @@ class ToolResearchLoop:
         suffix = f" ev={id_blob}" if id_blob else ""
         return f"TOOL {tool} {args_blob} → {envelope.status.value} ({coverage}){suffix}"
 
+    @staticmethod
+    def _evidence_nudge(ledger: EvidenceLedger) -> str:
+        """Explicit, model-visible stop signal once evidence exists."""
+        evidence_ids = [entry.evidence.evidence_id for entry in ledger.entries]
+        if not evidence_ids:
+            return "هنوز هیچ evidence معتبری جمع نشده؛ با ابزارها شروع کن."
+        shown = ", ".join(evidence_ids[:12])
+        more = "…" if len(evidence_ids) > 12 else ""
+        return (
+            "شواهد در دسترس (evidence_id معتبر): "
+            + shown
+            + more
+            + "\nاگر با همین شواهد می‌توانی پرسش را مستند پاسخ دهی، همین حالا "
+            "action=answer بده و جست‌وجوی جدید نکن. فقط اگر وجهی از پرسش هنوز "
+            "بی‌پاسخ است، همان وجه را هدف بگیر."
+        )
+
     def _call_planner(
         self,
         system_prompt: str,
@@ -541,6 +626,7 @@ class ToolResearchLoop:
         applicable_time: date,
         state: _RunState,
         episode: ResearchEpisode,
+        ledger: EvidenceLedger,
     ) -> PlannerTurn | None:
         header = (
             f"پرسش: {question}\n"
@@ -566,18 +652,19 @@ class ToolResearchLoop:
                     header,
                     "تاریخچه‌ی پژوهش تا این لحظه:\n" + notice,
                     *lines,
+                    self._evidence_nudge(ledger),
                 )
             )
         else:
             transcript = f"{header}\n\nهیچ گامی انجام نشده؛ شروع کن."
         last_error: DomainError | None = None
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 return self.planner.decide(system_prompt, transcript)
             except DomainError as exc:
                 last_error = exc
-                if attempt == 0:
-                    time.sleep(0.5)
+                if attempt < 2:
+                    time.sleep(0.5 * (attempt + 1))
                     continue
         episode.identified_issues.append(IncompleteReason.LLM_ERROR.value)
         state.steps.append(
@@ -607,6 +694,13 @@ class ToolResearchLoop:
             "get_version_history": ResearchActionType.CHECKED_VERSION,
             "temporal_check": ResearchActionType.CHECKED_VERSION,
             "get_references": ResearchActionType.FOLLOWED_REFERENCE,
+            # graph navigation tools
+            "get_provision_text": ResearchActionType.OPENED,
+            "list_provisions": ResearchActionType.OPENED,
+            "get_judgment_text": ResearchActionType.OPENED,
+            "node_neighbors": ResearchActionType.FOLLOWED_REFERENCE,
+            "find_paths": ResearchActionType.FOLLOWED_REFERENCE,
+            "judgments_for_law": ResearchActionType.FOLLOWED_REFERENCE,
         }.get(tool, ResearchActionType.SEARCHED)
         target = (
             args.get("provision_version_id")

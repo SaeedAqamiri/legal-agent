@@ -199,6 +199,15 @@ class InMemoryCanonicalRepository(CanonicalRepository):
         except KeyError as exc:
             raise NotFoundError(f"instrument {instrument_id!r} not found") from exc
 
+    def list_instrument_titles(self) -> tuple[str, ...]:
+        titles: set[str] = set()
+        for item in self.instruments.values():
+            if item.canonical_title:
+                titles.add(item.canonical_title)
+            if item.title:
+                titles.add(item.title)
+        return tuple(titles)
+
     def get_source_document(self, source_document_id: str) -> SourceDocument:
         try:
             return self.source_documents[source_document_id]

@@ -8,10 +8,14 @@ explore UI read it through this helper so the query lives in one place.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 #: Longest article text returned in one payload (agent/UI both cap here).
 MAX_PROVISION_TEXT = 6000
+
+#: Longest judgment/advisory-opinion text returned in one payload.
+MAX_JUDGMENT_TEXT = 8000
 
 _PROVISION_TEXT_SQL = """
 SELECT p.provision_id,
@@ -70,6 +74,57 @@ def fetch_instrument_text(connection: Any, instrument_id: str) -> dict[str, Any]
         if row[1] is not None or row[3] is not None
     ]
     return {"instrument_id": instrument_id, "title": rows[0][0], "provisions": provisions}
+
+
+_JUDGMENT_TEXT_SQL = """
+SELECT d.title, d.doc_kind, d.issue_date, d.source_uri,
+       d.metadata->>'cat' AS category,
+       d.metadata->>'summary' AS summary,
+       d.text_path,
+       i.issuer
+  FROM sources.source_documents d
+  LEFT JOIN sources.instruments i ON i.instrument_uid = d.instrument_uid
+ WHERE d.document_uid::text = %s
+ LIMIT 1
+"""
+
+
+def fetch_judgment_text(connection: Any, document_uid: str) -> dict[str, Any] | None:
+    """Return the text + metadata of a judgment/advisory opinion, or ``None``.
+
+    Judgments live on the sources side (``sources.source_documents``) rather
+    than in canonical, so the graph mirror carries only labels/summaries and
+    the verbatim text is read from ``text_path`` on demand.
+    """
+    with connection.cursor() as cur:
+        cur.execute(_JUDGMENT_TEXT_SQL, (document_uid,))
+        row = cur.fetchone()
+    if row is None:
+        return None
+    title, doc_kind, issue_date, source_uri, category, summary, text_path, issuer = row
+    text = ""
+    if text_path and Path(text_path).exists():
+        try:
+            text = Path(text_path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+    kind = (
+        "opinion"
+        if doc_kind != "judgment" or "نظریه" in (title or "")
+        else "judgment"
+    )
+    return {
+        "document_uid": document_uid,
+        "title": title,
+        "kind": kind,
+        "category": category,
+        "issuer": issuer,
+        "date": issue_date.isoformat() if issue_date is not None else None,
+        "summary": summary,
+        "text": text[:MAX_JUDGMENT_TEXT],
+        "truncated": len(text) > MAX_JUDGMENT_TEXT,
+        "source_url": source_uri,
+    }
 
 
 def fetch_provision_text(connection: Any, provision_id: str) -> dict[str, Any] | None:

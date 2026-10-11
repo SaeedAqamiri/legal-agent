@@ -9,14 +9,16 @@ from itertools import count
 from agentic_fixture import build_canonical
 from fastapi.testclient import TestClient
 
-from legal_agent_core.agentic.envelope import RefStore, ToolStatus
+from legal_agent_core.agentic.composite import CompositeTools
+from legal_agent_core.agentic.envelope import RefStore, ToolStatus, make_envelope
 from legal_agent_core.agentic.graph_chat import (
     GraphChatConfig,
     GraphChatLoop,
     GraphChatService,
 )
-from legal_agent_core.agentic.graph_tools import GraphTools
+from legal_agent_core.agentic.graph_tools import GraphTools, harvest_refs, search_graph
 from legal_agent_core.agentic.planner import PlannerDecision, PlannerTurn
+from legal_agent_core.agentic.tools import ToolResult
 from legal_agent_core.answering import CitationPipeline
 from legal_agent_core.api import APIContainer, create_app
 from legal_agent_core.application import (
@@ -73,7 +75,7 @@ def scripted_planner(decisions: list[dict]):
             self.calls: list[str] = []
             self.index = 0
 
-        def decide(self, system_prompt: str, user_prompt: str) -> PlannerTurn:
+        def decide(self, system_prompt: str, user_prompt: str, *, force_answer: bool = False) -> PlannerTurn:
             del system_prompt
             self.calls.append(user_prompt)
             payload = decisions[min(self.index, len(decisions) - 1)]
@@ -280,6 +282,189 @@ class GraphToolsTests(unittest.TestCase):
         self.assertEqual(envelope.items[0]["instrument_title"], "قانون هوای پاک")
 
 
+class CypherCaptureTests(unittest.TestCase):
+    def test_dispatch_injects_executed_cypher_into_meta(self) -> None:
+        graph = FakeGraph({"labels(n)[0]": [["LegalInstrument", 608]]})
+        envelope = GraphTools(graph).dispatch(RefStore(), "graph_stats", {})
+        self.assertIn("cypher", envelope.meta)
+        self.assertTrue(envelope.meta["cypher"])
+        self.assertIn("query", envelope.meta["cypher"][0])
+
+    def test_dispatch_without_queries_has_no_cypher_key(self) -> None:
+        tools = GraphTools(FakeGraph())
+        envelope = tools.dispatch(
+            RefStore(), "get_provision_text", {"provision_id": "p-1"}
+        )
+        self.assertNotIn("cypher", envelope.meta)
+
+
+class JudicialToolsTests(unittest.TestCase):
+    def test_search_judgments_ranks_and_returns_kind_summary(self) -> None:
+        graph = FakeGraph(
+            {
+                "MATCH (x:Judgment)": [
+                    ["j-2", "قانون فوتبال", "خلاصه", "رویه قضایی", 0],
+                    ["j-1", "رأی وحدت رویه درباره فدراسیون فوتبال", "خلاصه فدراسیون", "آرا وحدت رویه", 4],
+                ],
+                "MATCH (x:AdvisoryOpinion)": [],
+            }
+        )
+        envelope = GraphTools(graph).dispatch(
+            RefStore(), "search_judgments", {"topic": "فدراسیون فوتبال"}
+        )
+        self.assertIs(envelope.status, ToolStatus.OK)
+        self.assertEqual([item["id"] for item in envelope.items], ["j-1", "j-2"])
+        self.assertEqual(envelope.items[0]["kind"], "judgment")
+        self.assertEqual(envelope.items[0]["cites"], 4)
+
+    def test_search_judgments_empty_when_no_match(self) -> None:
+        graph = FakeGraph({"MATCH (x:Judgment)": [], "MATCH (x:AdvisoryOpinion)": []})
+        envelope = GraphTools(graph).dispatch(
+            RefStore(), "search_judgments", {"topic": "ناموجود"}
+        )
+        self.assertIs(envelope.status, ToolStatus.EMPTY)
+
+    def test_judgments_for_law_resolves_and_returns_citing_rulings(self) -> None:
+        graph = FakeGraph(
+            {
+                "i.id = $ref": [["inst-1", "قانون مدنی"]],
+                "MATCH (j:Judgment)-[c:CITES]": [["j-1", "رأی الف", "خلاصه", "رویه", 7]],
+                "MATCH (o:AdvisoryOpinion)-[c:CITES]": [],
+            }
+        )
+        envelope = GraphTools(graph).dispatch(
+            RefStore(), "judgments_for_law", {"law": "قانون مدنی"}
+        )
+        self.assertIs(envelope.status, ToolStatus.OK)
+        self.assertEqual(envelope.meta["law_id"], "inst-1")
+        self.assertEqual(envelope.items[0]["id"], "j-1")
+        self.assertEqual(envelope.items[0]["law_id"], "inst-1")
+        self.assertEqual(envelope.items[0]["hits"], 7)
+
+    def test_judgments_for_law_unknown_is_not_found(self) -> None:
+        graph = FakeGraph({"i.id = $ref": [], "toLower(i.title) CONTAINS": []})
+        envelope = GraphTools(graph).dispatch(
+            RefStore(), "judgments_for_law", {"law": "ناموجود"}
+        )
+        self.assertIs(envelope.status, ToolStatus.NOT_FOUND)
+
+    def test_get_judgment_text_without_provider_is_honest_error(self) -> None:
+        envelope = GraphTools(FakeGraph()).dispatch(
+            RefStore(), "get_judgment_text", {"judgment_id": "j-1"}
+        )
+        self.assertIs(envelope.status, ToolStatus.ERROR)
+
+    def test_get_judgment_text_returns_text_and_cited_laws(self) -> None:
+        graph = FakeGraph({"MATCH (j {id: $jid})": [["i-1", "قانون کار", 3]]})
+        tools = GraphTools(
+            graph,
+            judgment_text=lambda uid: {
+                "title": "رأی شماره ۱",
+                "kind": "judgment",
+                "category": "آرا وحدت رویه",
+                "summary": "خلاصه",
+                "text": "متن کامل رأی",
+            },
+        )
+        envelope = tools.dispatch(
+            RefStore(), "get_judgment_text", {"judgment_id": "j-1"}
+        )
+        self.assertIs(envelope.status, ToolStatus.OK)
+        self.assertEqual(envelope.items[0]["text"], "متن کامل رأی")
+        self.assertEqual(envelope.items[0]["cited_laws"][0]["id"], "i-1")
+
+
+class HarvestRefsTests(unittest.TestCase):
+    def test_node_neighbors_builds_focus_edges(self) -> None:
+        envelope = make_envelope(
+            RefStore(),
+            (
+                {
+                    "id": "j-1",
+                    "label": "Judgment",
+                    "title": "رأی",
+                    "rel": "CITES",
+                    "direction": "in",
+                },
+            ),
+        )
+        nodes, edges = harvest_refs("node_neighbors", envelope, {"node_id": "i-1"})
+        self.assertEqual(nodes[0]["label"], "judgment")
+        self.assertEqual(edges[0], {"source": "j-1", "target": "i-1", "rel": "CITES"})
+
+    def test_find_paths_expands_nodes_and_edges(self) -> None:
+        envelope = make_envelope(
+            RefStore(),
+            (
+                {
+                    "path": [
+                        {"id": "j-1", "label": "judgment", "title": "رأی"},
+                        {"id": "i-1", "label": "instrument", "title": "قانون"},
+                    ],
+                    "rels": ["CITES"],
+                },
+            ),
+        )
+        nodes, edges = harvest_refs("find_paths", envelope, {})
+        self.assertEqual({node["id"] for node in nodes}, {"j-1", "i-1"})
+        self.assertEqual(edges[0], {"source": "j-1", "target": "i-1", "rel": "CITES"})
+
+    def test_canonical_items_build_instrument_provision_edge(self) -> None:
+        envelope = make_envelope(
+            RefStore(),
+            (
+                {
+                    "provision_id": "p-1",
+                    "instrument_id": "i-1",
+                    "instrument_title": "قانون کار",
+                    "label": "ماده ۱",
+                },
+            ),
+        )
+        nodes, edges = harvest_refs("search_provisions", envelope, {})
+        labels = {node["id"]: node["label"] for node in nodes}
+        self.assertEqual(labels["p-1"], "provision")
+        self.assertEqual(labels["i-1"], "instrument")
+        self.assertEqual(
+            edges[0], {"source": "i-1", "target": "p-1", "rel": "CONTAINS"}
+        )
+
+
+class _StubCanonicalTools:
+    def __init__(self) -> None:
+        self.hidden_tools: frozenset[str] = frozenset()
+        self.evidence_index: dict[str, str] = {}
+
+    def dispatch(self, store, name, args):
+        return ToolResult(make_envelope(store, ({"provision_id": "p-1"},)), ())
+
+    def spec_available(self, name: str) -> bool:
+        return True
+
+    def tool_catalog(self) -> str:
+        return "search_provisions(query) — canonical"
+
+
+class CompositeToolsTests(unittest.TestCase):
+    def test_graph_tool_routes_to_graph_surface(self) -> None:
+        graph = FakeGraph({"labels(n)[0]": [["LegalInstrument", 608]]})
+        composite = CompositeTools(_StubCanonicalTools(), GraphTools(graph))
+        result = composite.dispatch(RefStore(), "graph_stats", {})
+        self.assertIs(result.envelope.status, ToolStatus.OK)
+        self.assertEqual(result.evidence, ())
+        self.assertIn("ناوبری گراف", composite.tool_catalog())
+
+    def test_canonical_tool_routes_to_canonical_surface(self) -> None:
+        composite = CompositeTools(_StubCanonicalTools(), GraphTools(FakeGraph()))
+        result = composite.dispatch(RefStore(), "search_provisions", {})
+        self.assertEqual(result.envelope.items[0]["provision_id"], "p-1")
+
+    def test_composite_without_graph_is_canonical_only(self) -> None:
+        composite = CompositeTools(_StubCanonicalTools())
+        self.assertNotIn("ناوبری گراف", composite.tool_catalog())
+        self.assertFalse(composite.spec_available("graph_stats"))
+
+
 class GraphChatLoopTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tools = GraphTools(
@@ -325,7 +510,7 @@ class GraphChatLoopTests(unittest.TestCase):
 
     def test_planner_failure_reports_honest_non_answer(self) -> None:
         class FailingPlanner:
-            def decide(self, system_prompt: str, user_prompt: str) -> PlannerTurn:
+            def decide(self, system_prompt: str, user_prompt: str, *, force_answer: bool = False) -> PlannerTurn:
                 raise DomainError("llm down")
 
         result = GraphChatLoop(self.tools, FailingPlanner()).run(message="سلام")
@@ -369,6 +554,147 @@ class GraphChatLoopTests(unittest.TestCase):
         result = GraphChatLoop(tools, planner).run(message="قانون کار")
         self.assertEqual([node["id"] for node in result.nodes], ["inst-1"])
         self.assertEqual(result.nodes[0]["label"], "instrument")
+
+
+class PlannerNativeToolTests(unittest.TestCase):
+    def _planner(self, gateway, **kwargs):
+        from legal_agent_core.agentic.planner import LLMToolPlanner
+        from legal_agent_core.llm import (
+            EndpointStyle,
+            LLMTask,
+            ModelProfile,
+            ProviderConfig,
+        )
+
+        provider = ProviderConfig(
+            "graph-chat-llm",
+            "http://localhost:1/v1",
+            EndpointStyle.CHAT_COMPLETIONS,
+            api_key="k",
+        )
+        profile = ModelProfile(
+            "graph-chat",
+            1,
+            LLMTask.NAVIGATION,
+            "graph-chat-llm",
+            "m",
+            "graph-chat",
+            1,
+            128,
+            0.2,
+        )
+        return LLMToolPlanner(gateway, provider, profile, **kwargs)
+
+    def test_native_tool_call_becomes_tool_decision(self) -> None:
+        from legal_agent_core.llm import ProviderResponse, TokenUsage, ToolCall
+
+        class Gateway:
+            def generate(self, provider, profile, request):
+                return ProviderResponse(
+                    "r-1",
+                    "m",
+                    "",
+                    TokenUsage(1, 1, 2),
+                    tool_calls=(ToolCall("search_laws", '{"topic": "x"}', "call-1"),),
+                )
+
+        turn = self._planner(Gateway()).decide("system", "user")
+        self.assertEqual(turn.decision.action, "tool")
+        self.assertEqual(turn.decision.tool, "search_laws")
+        self.assertEqual(turn.decision.args, {"topic": "x"})
+
+    def test_bad_tool_arguments_surface_as_contract_error(self) -> None:
+        from legal_agent_core.llm import ProviderResponse, TokenUsage, ToolCall
+
+        class Gateway:
+            def generate(self, provider, profile, request):
+                return ProviderResponse(
+                    "r-1",
+                    "m",
+                    "",
+                    TokenUsage(1, 1, 2),
+                    tool_calls=(ToolCall("search_laws", "not json", "call-1"),),
+                )
+
+        turn = self._planner(Gateway()).decide("system", "user")
+        self.assertIsNone(turn.decision)
+        self.assertIn("not valid JSON", turn.contract_error)
+
+    def test_plain_text_is_answer_only_when_allowed(self) -> None:
+        from legal_agent_core.llm import ProviderResponse, TokenUsage
+
+        class Gateway:
+            def generate(self, provider, profile, request):
+                return ProviderResponse("r-1", "m", "پاسخ متنی", TokenUsage(1, 1, 2))
+
+        strict = self._planner(Gateway()).decide("system", "user")
+        self.assertIsNone(strict.decision)
+        self.assertIsNotNone(strict.contract_error)
+
+        lenient = self._planner(Gateway(), allow_text_answer=True).decide("system", "user")
+        self.assertEqual(lenient.decision.action, "answer")
+        self.assertEqual(lenient.decision.answer, "پاسخ متنی")
+
+
+class GraphToolSchemaTests(unittest.TestCase):
+    def test_schemas_cover_every_tool_and_declare_required_args(self) -> None:
+        from legal_agent_core.agentic.graph_tools import (
+            GRAPH_TOOL_SPECS,
+            graph_tool_schemas,
+        )
+
+        schemas = graph_tool_schemas()
+        self.assertEqual(
+            {schema["function"]["name"] for schema in schemas},
+            {spec.name for spec in GRAPH_TOOL_SPECS},
+        )
+        for schema in schemas:
+            parameters = schema["function"]["parameters"]
+            self.assertEqual(parameters["type"], "object")
+            for name in parameters["required"]:
+                self.assertIn(name, parameters["properties"])
+        stats = next(s for s in schemas if s["function"]["name"] == "graph_stats")
+        self.assertEqual(stats["function"]["parameters"]["required"], [])
+
+
+class SearchGraphTests(unittest.TestCase):
+    def test_ranks_title_matches_and_merges_types(self) -> None:
+        graph = FakeGraph(
+            {
+                "MATCH (x:LegalInstrument)": [
+                    ["inst-1", "قانون جهش تولید مسکن", "خلاصه", "مسکن", "3", "statute"],
+                    ["inst-2", "قانون مالیات", "اشاره به جهش تولید", "مالیات", "3", "statute"],
+                ],
+                "MATCH (x:Judgment)": [
+                    ["j-1", "رأی درباره جهش تولید", "خلاصه", "رویه قضایی"],
+                ],
+                "MATCH (x:AdvisoryOpinion)": [],
+            }
+        )
+        results = search_graph(graph, "جهش تولید")
+        ids = [item["id"] for item in results]
+        self.assertIn("inst-1", ids)
+        self.assertIn("j-1", ids)
+        # title match (+4+4, instrument bonus) outranks a summary-only match
+        self.assertEqual(results[0]["id"], "inst-1")
+        self.assertEqual(results[0]["label"], "instrument")
+        self.assertGreater(results[0]["score"], results[-1]["score"])
+
+    def test_blank_query_returns_empty(self) -> None:
+        self.assertEqual(search_graph(FakeGraph(), "   "), [])
+
+    def test_survives_one_label_failing(self) -> None:
+        class Flaky(FakeGraph):
+            def ro_query(self, query, params=None):
+                if "Judgment" in query:
+                    raise RuntimeError("boom")
+                return super().ro_query(query, params)
+
+        graph = Flaky(
+            {"MATCH (x:LegalInstrument)": [["inst-1", "قانون کار", "خلاصه", "کار", "3", "statute"]]}
+        )
+        results = search_graph(graph, "کار")
+        self.assertEqual([item["id"] for item in results], ["inst-1"])
 
 
 class DeterministicComposer:
@@ -438,6 +764,15 @@ class GraphChatEndpointTests(unittest.TestCase):
                     metrics,
                     default_principal=principal,
                     graph_chat=StubService(),
+                    laws_graph=FakeGraph(
+                        {
+                            "MATCH (x:LegalInstrument)": [
+                                ["inst-1", "قانون جهش تولید", "خلاصه", "اقتصاد", "3", "statute"]
+                            ],
+                            "MATCH (x:Judgment)": [],
+                            "MATCH (x:AdvisoryOpinion)": [],
+                        }
+                    ),
                 )
             )
         )
@@ -486,6 +821,17 @@ class GraphChatEndpointTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 422)
         self.assertIn("not configured", response.json()["detail"])
+
+    def test_graph_search_endpoint_returns_ranked_results(self) -> None:
+        response = self.client.get(
+            "/v1/organizations/org-a/graph/search",
+            params={"q": "جهش تولید"},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["results"][0]["id"], "inst-1")
+        self.assertEqual(data["results"][0]["label"], "instrument")
 
 
 if __name__ == "__main__":  # pragma: no cover

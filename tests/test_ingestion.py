@@ -6,6 +6,7 @@ from legal_agent_core.canonical import (
     BoundingBox,
     DocumentStatus,
     InstrumentType,
+    LegalInstrument,
     ProvisionType,
     ResolutionStatus,
 )
@@ -156,6 +157,90 @@ class IngestionPipelineTests(unittest.TestCase):
         self.assertTrue(set(first.provision_version_ids).isdisjoint(second.provision_version_ids))
         self.assertEqual(len(repository.provisions), 3)
         self.assertEqual(len(repository.provision_versions), 6)
+
+    def test_cross_law_reference_keeps_target_name_unresolved(self) -> None:
+        repository = InMemoryCanonicalRepository()
+        repository.add_instrument(
+            LegalInstrument(
+                instrument_id="inst_labor",
+                title="قانون کار",
+                canonical_title="قانون کار",
+                instrument_type=InstrumentType.STATUTE,
+                jurisdiction="IR",
+            )
+        )
+        parsed = parsed_document()
+        chapter = parsed.provisions[0]
+        article_four, article_five = chapter.children
+        cross_law = replace(
+            article_five,
+            text="مطابق ماده (۴) قانون کار جمهوری اسلامی ایران اقدام شود.",
+        )
+        parsed = replace(parsed, provisions=(replace(chapter, children=(article_four, cross_law)),))
+
+        result = CanonicalIngestionPipeline(repository).ingest(parsed)
+
+        self.assertEqual(result.explicit_references[0].resolution_status, ResolutionStatus.UNRESOLVED)
+        self.assertIsNone(result.explicit_references[0].resolved_target_provision_id)
+        self.assertIn("قانون کار", result.explicit_references[0].target_text)
+        self.assertEqual(result.canonical_edges, ())
+
+    def test_cross_law_reference_never_resolves_to_same_instrument_article(self) -> None:
+        repository = InMemoryCanonicalRepository()
+        repository.add_instrument(
+            LegalInstrument(
+                instrument_id="inst_labor",
+                title="قانون کار",
+                canonical_title="قانون کار",
+                instrument_type=InstrumentType.STATUTE,
+                jurisdiction="IR",
+            )
+        )
+        parsed = parsed_document()
+        chapter = parsed.provisions[0]
+        article_four, article_five = chapter.children
+        cross_law = replace(article_four, text="مطابق ماده (۵) قانون کار اقدام شود.")
+        parsed = replace(parsed, provisions=(replace(chapter, children=(cross_law, article_five)),))
+
+        result = CanonicalIngestionPipeline(repository).ingest(parsed)
+
+        reference = next(
+            item for item in result.explicit_references if "قانون کار" in item.target_text
+        )
+        self.assertEqual(reference.resolution_status, ResolutionStatus.UNRESOLVED)
+        self.assertIsNone(reference.resolved_target_provision_id)
+
+    def test_extractor_without_catalog_keeps_legacy_behavior(self) -> None:
+        repository = InMemoryCanonicalRepository()
+        parsed = parsed_document()
+        chapter = parsed.provisions[0]
+        article_four, article_five = chapter.children
+        cross_law = replace(article_five, text="مطابق ماده (۴) قانون کار اقدام شود.")
+        parsed = replace(parsed, provisions=(replace(chapter, children=(article_four, cross_law)),))
+
+        CanonicalIngestionPipeline(repository).ingest(parsed)
+
+        # «قانون کار» is absent from this repository's catalog, so the mention
+        # stays a bare «ماده ۴» exactly as the legacy extractor produced.
+        stored = [
+            item
+            for item in repository.explicit_references.values()
+            if item.resolution_status == ResolutionStatus.UNRESOLVED
+        ]
+        self.assertTrue(stored)
+        self.assertTrue(all(item.target_text.strip() == "ماده 4" for item in stored))
+
+    def test_extractor_still_resolves_self_scoped_references_with_catalog(self) -> None:
+        repository = InMemoryCanonicalRepository()
+        parsed = parsed_document()
+
+        result = CanonicalIngestionPipeline(repository).ingest(parsed)
+
+        # «ماده ۴ این قانون» must remain resolvable even though the catalog
+        # now also contains the ingested instrument's own title.
+        reference = result.explicit_references[0]
+        self.assertEqual(reference.resolution_status, ResolutionStatus.RESOLVED)
+        self.assertEqual(len(result.canonical_edges), 1)
 
 
 if __name__ == "__main__":

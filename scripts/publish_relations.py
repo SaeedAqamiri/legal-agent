@@ -7,6 +7,9 @@ Steps:
                  instruments (same gate as the review endpoint).
   2. bare refs — «ماده N» references the deterministic extractor left unresolved:
                  resolved to the article of the SAME instrument (no LLM needed).
+  2b. crosslaw — «ماده N قانون X» mentions whose law name the extractor dropped:
+                 target_text rewritten from the provision text, then resolved
+                 deterministically (catalog substring containment, no LLM).
   3. named refs— references that name another law («ماده ۵ قانون X») resolved by
                  the LLM (glm-5.3-flash) against the instrument catalog with
                  difflib top-3 candidates; verdict -> explicit_references.updated
@@ -40,6 +43,10 @@ BASE_URL = "https://api.z.ai/api/coding/paas/v4"
 MODEL = "glm-5.3-flash"
 DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
 BARE_RE = re.compile(r"^ماده\s*([۰-۹0-9]+)$")
+# Bare resolution also accepts the explicit local scope («ماده ۲ این قانون»).
+BARE_SELF_RE = re.compile(
+    r"^ماده\s*([۰-۹0-9]+)(?:\s+این\s+(?:قانون|آیین[\u200c\s-]*نامه|دستورالعمل|بخشنامه|مصوبه))?$"
+)
 JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
 EFFECT_EDGE = {
@@ -55,6 +62,14 @@ EFFECT_EDGE = {
     "conflict": "conflicts_with",
     "implement": "implements",
 }
+
+# «ماده (۱۲۲) قانون کار جمهوری اسلامی ایران» — capture the target-law name the
+# legacy extractor dropped (it only kept «ماده ۱۲۲»).
+CROSS_LAW_RE = re.compile(
+    r"ماده[\s\u200c]*[\(]?\s*([۰-۹0-9]+)(?:\s*[\)])?[\s\u200c]+"
+    r"((?:قانون|آیین[\u200c\s-]*نامه|دستورالعمل|مصوبه|مقررات|شیوه[\u200c\s]*نامه)[^\n،؛.!]{0,100})"
+)
+AMENDMENT_GUARD_RE = re.compile(r"اصلاح[yی‌\s]*$")
 
 
 def log(msg: str) -> None:
@@ -167,7 +182,8 @@ def resolve_bare_refs(db: psycopg.Connection) -> dict:
                       pv.provision_id, pv.instrument_id
                FROM canonical.explicit_references r
                JOIN canonical.provision_versions pv ON pv.provision_version_id = r.source_provision_version_id
-               WHERE r.resolution_status = 'unresolved' AND r.target_text ~ '^ماده\\s*[۰-۹0-9]+$'"""
+               WHERE r.resolution_status = 'unresolved'
+                 AND r.target_text ~ '^ماده\\s*[۰-۹0-9]+(\\s+این\\s+[^\\s]+)?$'"""
         )
         rows = cur.fetchall()
         cur.execute(
@@ -181,7 +197,11 @@ def resolve_bare_refs(db: psycopg.Connection) -> dict:
             for instrument_id, number, pid in cur.fetchall()
         }
     for reference_id, span_id, target_text, provision_id, instrument_id in rows:
-        number = BARE_RE.match(target_text.strip()).group(1).translate(DIGITS)
+        match = BARE_SELF_RE.match(target_text.strip())
+        if match is None:
+            stats["no_article"] += 1
+            continue
+        number = match.group(1).translate(DIGITS)
         target = article_map.get((instrument_id, number))
         if not target or target == provision_id:
             stats["no_article"] += 1
@@ -215,12 +235,143 @@ def resolve_bare_refs(db: psycopg.Connection) -> dict:
     return stats
 
 
+def load_catalog(db: psycopg.Connection) -> tuple[dict[str, str], list[str]]:
+    """normalized title -> instrument_id, plus normalized titles longest-first."""
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT instrument_id, canonical_title, title FROM canonical.legal_instruments"
+        )
+        rows = cur.fetchall()
+    catalog_by_key: dict[str, str] = {}
+    for instrument_id, canonical_title, title in rows:
+        for name in (canonical_title, title):
+            key = normalize_legal_text(name or "")
+            if key:
+                catalog_by_key.setdefault(key, instrument_id)
+    return catalog_by_key, sorted(catalog_by_key, key=len, reverse=True)
+
+
+def match_catalog(phrase: str, catalog_by_key: dict[str, str], sorted_titles: list[str]) -> str | None:
+    """Deterministic: longest catalog title contained in the phrase.
+
+    «...قانون اصلاح X» guard: the amending law is not X itself — keep scanning.
+    """
+    key = normalize_legal_text(phrase)
+    for title in sorted_titles:
+        position = key.find(title)
+        if position < 0:
+            continue
+        if AMENDMENT_GUARD_RE.search(key[:position]):
+            continue
+        return catalog_by_key[title]
+    return None
+
+
+def resolve_cross_law_refs(db: psycopg.Connection) -> dict:
+    """Backfill stage: the legacy extractor stored bare «ماده N» and dropped
+    the target-law name. Re-scan the provision text, rewrite target_text to
+    «ماده N <law name>», then resolve deterministically against the catalog
+    (substring containment). Leftovers stay unresolved for the LLM stage.
+    """
+    stats = {"scanned_versions": 0, "rewritten": 0, "resolved": 0, "edges": 0}
+    catalog_by_key, sorted_titles = load_catalog(db)
+    with db.cursor() as cur:
+        cur.execute(
+            """SELECT pv.provision_version_id, pv.provision_id, pv.normalized_text,
+                      array_agg(r.reference_id), array_agg(r.target_text)
+                 FROM canonical.explicit_references r
+                 JOIN canonical.provision_versions pv
+                   ON pv.provision_version_id = r.source_provision_version_id
+                WHERE r.resolution_status = 'unresolved'
+                GROUP BY 1, 2, 3"""
+        )
+        versions = cur.fetchall()
+    log(f"crosslaw: scanning {len(versions)} provision versions")
+
+    updates: list[tuple[str, str]] = []  # (reference_id, new target_text)
+    resolutions: dict[str, tuple[str, str, str]] = {}  # ref -> (provision_id, span_id, text)
+    for _, provision_id, text, ref_ids, target_texts in versions:
+        stats["scanned_versions"] += 1
+        mentions: dict[str, set[str]] = {}
+        for number, name in CROSS_LAW_RE.findall(text or ""):
+            mentions.setdefault(number.translate(DIGITS), set()).add(name.strip())
+        for reference_id, target_text in zip(ref_ids, target_texts):
+            bare = BARE_RE.match((target_text or "").strip())
+            if bare:
+                names = mentions.get(bare.group(1).translate(DIGITS), set())
+                if len(names) != 1:
+                    continue
+                new_text = f"ماده {bare.group(1).translate(DIGITS)} {names.pop().strip()}".strip()
+                if new_text != target_text:
+                    updates.append((reference_id, new_text))
+                    resolutions[reference_id] = (provision_id, new_text)
+            else:
+                # Already-named leftover the previous LLM run could not match —
+                # try the deterministic catalog containment on it now.
+                if (target_text or "").strip():
+                    resolutions[reference_id] = (provision_id, target_text)
+
+    if updates:
+        with db.cursor() as cur:
+            for reference_id, new_text in updates:
+                cur.execute(
+                    """UPDATE canonical.explicit_references SET target_text=%s
+                        WHERE reference_id=%s AND resolution_status='unresolved'""",
+                    (new_text, reference_id),
+                )
+                stats["rewritten"] += cur.rowcount
+        db.commit()
+    log(f"crosslaw: {stats['rewritten']} target_texts rewritten")
+
+    for reference_id, (provision_id, phrase) in resolutions.items():
+        instrument_id = match_catalog(phrase, catalog_by_key, sorted_titles)
+        if not instrument_id:
+            continue
+        with db.cursor() as cur:
+            # Atomic status flip + edge insert (CTE): the schema requires a
+            # source_span_id on explicitly_references edges, so resolve it from
+            # the reference row rather than passing NULL.
+            cur.execute(
+                """WITH upd AS (
+                       UPDATE canonical.explicit_references
+                          SET resolution_status='ambiguous', confidence=0.9
+                        WHERE reference_id=%s AND resolution_status='unresolved'
+                        RETURNING reference_id, source_span_id
+                   )
+                   INSERT INTO canonical.graph_edges (
+                       edge_id, source_node_type, source_node_id, target_node_type,
+                       target_node_id, edge_type, source_span_id, extraction_method,
+                       confidence, created_by, source_id
+                   )
+                   SELECT %s, 'provision', %s, 'legal_instrument', %s,
+                          'explicitly_references', u.source_span_id, 'parser', 0.9,
+                          'refs-crosslaw', %s
+                     FROM upd u
+                   ON CONFLICT (edge_id) DO NOTHING""",
+                (
+                    reference_id,
+                    f"edge:ref:{hashlib.sha1(reference_id.encode()).hexdigest()[:24]}",
+                    provision_id,
+                    instrument_id,
+                    reference_id,
+                ),
+            )
+            if cur.rowcount == 0:
+                continue  # already resolved (or no span) — skip the edge
+            stats["edges"] += cur.rowcount
+        stats["resolved"] += 1
+    db.commit()
+    return stats
+
+
 def resolve_named_refs(db: psycopg.Connection, key: str) -> dict:
     stats = {"resolved": 0, "edges": 0, "unmatched": 0, "calls": 0}
     with db.cursor() as cur:
         cur.execute(
             """SELECT DISTINCT target_text FROM canonical.explicit_references
-               WHERE resolution_status='unresolved' AND target_text !~ '^ماده\\s*[۰-۹0-9]+$'"""
+               WHERE resolution_status='unresolved'
+                 AND target_text !~ '^ماده\\s*[۰-۹0-9]+(\\s+این\\s+[^\\s]+)?$'
+                 AND target_text !~ 'قانون$'"""
         )
         phrases = [row[0] for row in cur.fetchall()]
         cur.execute("SELECT canonical_title FROM canonical.legal_instruments")
@@ -230,12 +381,24 @@ def resolve_named_refs(db: psycopg.Connection, key: str) -> dict:
 
     def candidates_for(phrase: str) -> list[str]:
         key_norm = normalize_legal_text(phrase)
-        scored = sorted(
-            catalog_by_key.items(),
-            key=lambda item: difflib.SequenceMatcher(None, key_norm, item[0]).ratio(),
-            reverse=True,
-        )
-        return [title for _, title in scored[:3]]
+        # The «ماده N» prefix is not part of the law title — matching without it
+        # keeps short titles («قانون کار») competitive in the difflib shortlist.
+        match_part = re.sub(r"^ماده\s*[۰-۹0-9]+[\s\u200c]*", "", key_norm)[:80]
+        # real_quick_ratio is a length-only upper bound of ratio(): cheap enough
+        # for the whole catalog, then full ratio() for the top slice only.
+        matchers = [
+            (title, difflib.SequenceMatcher(None, match_part, key))
+            for key, title in catalog_by_key.items()
+        ]
+        shortlist = sorted(matchers, key=lambda item: item[1].real_quick_ratio(), reverse=True)[:50]
+        scored = sorted(shortlist, key=lambda item: item[1].ratio(), reverse=True)
+        picks = [item[0] for item in scored[:3]]
+        # difflib buries short titles («قانون کار») under long phrases — make
+        # sure any title literally contained in the phrase is also offered.
+        for tkey, title in catalog_by_key.items():
+            if tkey in key_norm and title not in picks:
+                picks.append(title)
+        return picks[:5]
 
     def prompt(chunk: list[str]) -> str:
         lines = []
@@ -254,10 +417,21 @@ def resolve_named_refs(db: psycopg.Connection, key: str) -> dict:
     system = "تو کارشناس حقوق ایران هستی. فقط JSON معتبر برگردان."
     chunks = [phrases[i : i + 8] for i in range(0, len(phrases), 8)]
     verdicts: dict[str, str] = {}
+    cache_path = Path(__file__).resolve().parents[1] / "out" / "named_ref_verdicts.json"
+    try:
+        verdicts.update(json.loads(cache_path.read_text(encoding="utf-8")))
+        log(f"verdict cache: {len(verdicts)} entries loaded")
+    except (OSError, ValueError):
+        pass
+    pending = [chunk for chunk in chunks if any(p not in verdicts for p in chunk)]
+    log(f"named refs: {len(chunks)} chunks total, {len(pending)} to call")
+    def call_chunk(chunk: list[str]) -> dict | list:
+        # Prompt-building (candidates_for × 8 phrases) runs in the worker so
+        # the main thread stays free to consume results and log progress.
+        return llm_json(key, prompt(chunk), system)
+
     with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {
-            pool.submit(llm_json, key, prompt(chunk), system): chunk for chunk in chunks
-        }
+        futures = {pool.submit(call_chunk, chunk): chunk for chunk in pending}
         for done, future in enumerate(as_completed(futures), 1):
             chunk = futures[future]
             try:
@@ -275,9 +449,21 @@ def resolve_named_refs(db: psycopg.Connection, key: str) -> dict:
                         verdicts[chunk[idx]] = str(pick)
             except Exception as exc:  # noqa: BLE001
                 log(f"  chunk failed: {type(exc).__name__}: {str(exc)[:80]}")
-            if done % 2 == 0 or done == len(chunks):
-                log(f"  named refs: {done}/{len(chunks)} chunks")
+            if done % 10 == 0 or done == len(pending):
+                log(f"  named refs: {done}/{len(pending)} chunks")
+                try:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    cache_path.write_text(
+                        json.dumps(verdicts, ensure_ascii=False), encoding="utf-8"
+                    )
+                except OSError:
+                    pass
     log(f"LLM resolved {len(verdicts)}/{len(phrases)} phrases")
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(verdicts, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
 
     title_to_id: dict[str, str] = {}
     with db.cursor() as cur:
@@ -290,7 +476,10 @@ def resolve_named_refs(db: psycopg.Connection, key: str) -> dict:
                       pv.provision_id, r.confidence
                FROM canonical.explicit_references r
                JOIN canonical.provision_versions pv ON pv.provision_version_id = r.source_provision_version_id
-               WHERE r.resolution_status='unresolved' AND r.target_text !~ '^ماده\\s*[۰-۹0-9]+$'"""
+               WHERE r.resolution_status='unresolved'
+                 AND r.source_span_id IS NOT NULL
+                 AND r.target_text !~ '^ماده\\s*[۰-۹0-9]+(\\s+این\\s+[^\\s]+)?$'
+                 AND r.target_text !~ 'قانون$'"""
         )
         rows = cur.fetchall()
     for reference_id, span_id, target_text, provision_id, old_confidence in rows:
@@ -367,6 +556,10 @@ def main() -> int:
     if "bare" in stages:
         stats = resolve_bare_refs(db)
         log(f"bare refs: {stats}")
+
+    if "crosslaw" in stages:
+        stats = resolve_cross_law_refs(db)
+        log(f"crosslaw refs: {stats}")
 
     if "named" in stages and not args.skip_llm:
         stats = resolve_named_refs(db, key)

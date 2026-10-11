@@ -39,6 +39,9 @@ FALLBACK_MODEL = os.environ.get("LEGAL_AGENT_FALLBACK_MODEL", "deepseek-v4.1-fla
 FALLBACK_COOLDOWN = int(os.environ.get("LEGAL_AGENT_FALLBACK_COOLDOWN", "300"))
 PROMPT_VERSION = "provision-paragraph-v1"
 MAX_TOKENS = 16000
+#: provisions with fewer words than this are already paragraph-sized: their raw
+#: text is used as the summary directly (promoted rows), no LLM call
+MIN_WORDS = 250
 #: provisions per LLM call — keeps output under the token budget
 BATCH_SIZE = 25
 API_TXT = Path("~/api.txt").expanduser()
@@ -119,7 +122,8 @@ def _call(base_url: str, model: str, key: str, prompt: str, timeout: int) -> dic
         ],
     }
     if "z.ai" in base_url:
-        payload["thinking"] = {"type": "disabled"}
+        # reasoning on medium effort (user spec: never disabled, never max)
+        payload["thinking"] = {"type": "enabled", "effort": "medium"}
     request = urllib.request.Request(
         f"{base_url}/chat/completions",
         data=json.dumps(payload).encode(),
@@ -180,24 +184,43 @@ def llm_json(key: str, prompt: str, fallback_key: str, retries: int = 4) -> dict
     )
 
 
-def provisions_of(db: psycopg.Connection, instrument_id: str, only_missing: bool) -> list[dict]:
-    missing = (
+def _wordcount_sql() -> str:
+    """Word count of a provision's current text (used to split short vs long)."""
+    return (
+        "COALESCE((SELECT array_length(regexp_split_to_array("
+        "   COALESCE(pv.normalized_text, pv.text, ''), '\\s+'), 1)"
+        "  FROM canonical.provision_versions pv"
+        " WHERE pv.provision_id = p.provision_id"
+        " ORDER BY pv.provision_version_id LIMIT 1), 0)"
+    )
+
+
+def _missing_clause(only_missing: bool) -> str:
+    return (
         "AND NOT EXISTS (SELECT 1 FROM canonical.provision_summaries s"
         " WHERE s.provision_id = p.provision_id AND s.prompt_version = %s)"
         if only_missing
         else ""
     )
-    params: tuple = (instrument_id, PROMPT_VERSION) if only_missing else (instrument_id,)
+
+
+def provisions_of(db: psycopg.Connection, instrument_id: str, only_missing: bool) -> list[dict]:
+    """Long provisions (>= MIN_WORDS) that need an LLM paragraph summary."""
+    params: list = [instrument_id]
+    if only_missing:
+        params.append(PROMPT_VERSION)
+    params.append(MIN_WORDS)
     rows = db.execute(
         f"""SELECT p.provision_id, COALESCE(p.label, ''), COALESCE(p.title, ''),
-                  (SELECT COALESCE(pv.normalized_text, pv.text, '')
-                     FROM canonical.provision_versions pv
-                    WHERE pv.provision_id = p.provision_id
-                    ORDER BY pv.provision_version_id LIMIT 1)
+                   (SELECT COALESCE(pv.normalized_text, pv.text, '')
+                      FROM canonical.provision_versions pv
+                     WHERE pv.provision_id = p.provision_id
+                     ORDER BY pv.provision_version_id LIMIT 1)
              FROM canonical.provisions p
-            WHERE p.instrument_id = %s {missing}
+            WHERE p.instrument_id = %s {_missing_clause(only_missing)}
+              AND {_wordcount_sql()} >= %s
             ORDER BY p.ordinal, p.provision_id""",
-        params,
+        tuple(params),
     ).fetchall()
     return [
         {
@@ -208,6 +231,29 @@ def provisions_of(db: psycopg.Connection, instrument_id: str, only_missing: bool
         }
         for row in rows
     ]
+
+
+def short_provisions_of(
+    db: psycopg.Connection, instrument_id: str, only_missing: bool
+) -> list[tuple[str, str]]:
+    """Short provisions (< MIN_WORDS): their raw text IS the summary (no LLM)."""
+    params: list = [instrument_id]
+    if only_missing:
+        params.append(PROMPT_VERSION)
+    params.append(MIN_WORDS)
+    rows = db.execute(
+        f"""SELECT p.provision_id,
+                   (SELECT COALESCE(pv.normalized_text, pv.text, '')
+                      FROM canonical.provision_versions pv
+                     WHERE pv.provision_id = p.provision_id
+                     ORDER BY pv.provision_version_id LIMIT 1)
+             FROM canonical.provisions p
+            WHERE p.instrument_id = %s {_missing_clause(only_missing)}
+              AND {_wordcount_sql()} < %s
+            ORDER BY p.ordinal, p.provision_id""",
+        tuple(params),
+    ).fetchall()
+    return [(row[0], (row[1] or "").strip()) for row in rows]
 
 
 def build_prompt(instrument_title: str, nodes: list[dict]) -> str:
@@ -244,8 +290,8 @@ def main() -> int:
     fallback_key = fallback_api_key()
 
     with psycopg.connect(args.dsn, autocommit=True) as db:
-        condition = "AND i.instrument_id = %s" if args.instrument else ""
-        params = (args.instrument,) if args.instrument else ()
+        condition = "AND i.instrument_id = ANY(%s)" if args.instrument else ""
+        params = ([x.strip() for x in args.instrument.split(",") if x.strip()],) if args.instrument else ()
         # resume at provision granularity: pick instruments that still have
         # at least one un-summarized provision
         missing_cond = "" if args.force else (
@@ -271,13 +317,30 @@ def main() -> int:
         log(f"{len(todo)} instruments with un-summarized provisions (force={args.force})")
 
         tasks = []
+        short_stored = 0
         for instrument_id, title in todo:
+            # short provisions (< MIN_WORDS): their own text is the summary
+            for provision_id, text in short_provisions_of(db, instrument_id, only_missing=not args.force):
+                if not text:
+                    continue
+                db.execute(
+                    """INSERT INTO canonical.provision_summaries
+                           (provision_id, instrument_id, summary, model, prompt_version)
+                       VALUES (%s, %s, %s, 'raw-text-fallback', %s)
+                       ON CONFLICT (provision_id) DO UPDATE
+                       SET summary = EXCLUDED.summary, model = EXCLUDED.model,
+                           prompt_version = EXCLUDED.prompt_version, created_at = now()""",
+                    (provision_id, instrument_id, text[:4000], PROMPT_VERSION),
+                )
+                short_stored += 1
             nodes = provisions_of(db, instrument_id, only_missing=not args.force)
             batches = [
                 nodes[start : start + BATCH_SIZE]
                 for start in range(0, len(nodes), BATCH_SIZE)
             ]
             tasks.append((instrument_id, title, batches))
+        if short_stored:
+            log(f"stored raw-text summaries for {short_stored} short provisions (< {MIN_WORDS} words)")
         total_calls = sum(len(t[2]) for t in tasks)
         log(f"tasks: {len(tasks)} instruments, {total_calls} LLM calls, workers={args.workers}")
 

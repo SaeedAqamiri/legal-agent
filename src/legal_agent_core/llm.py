@@ -151,6 +151,11 @@ class GenerationRequest:
     safety_identifier: str | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
     structured_output: StructuredOutput | None = None
+    #: Native tool schemas (an OpenAI-style ``tools`` array). Empty disables
+    #: provider-native function calling.
+    tools: tuple[Mapping[str, Any], ...] = ()
+    #: "auto" | "none" | "required"; None defaults to "auto" when tools exist.
+    tool_choice: str | None = None
 
     def __post_init__(self) -> None:
         require_text(self.system_prompt, "system_prompt")
@@ -171,17 +176,37 @@ class TokenUsage:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolCall:
+    """A provider-native function call (an OpenAI ``message.tool_calls`` item).
+
+    Some reasoning models answer a tool-style prompt with a native tool call and
+    an empty ``content`` instead of the JSON-in-text contract. The gateway
+    surfaces those calls here so the planner can honour them.
+    """
+
+    name: str
+    arguments: str = "{}"
+    id: str = ""
+
+    def __post_init__(self) -> None:
+        require_text(self.name, "tool call name")
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderResponse:
     response_id: str
     model: str
     text: str
     usage: TokenUsage
     request_id: str | None = None
+    #: Native tool calls, when the model chose function-calling over text.
+    tool_calls: tuple[ToolCall, ...] = ()
 
     def __post_init__(self) -> None:
         require_text(self.response_id, "response_id")
         require_text(self.model, "model")
-        require_text(self.text, "response text")
+        if not self.text.strip() and not self.tool_calls:
+            raise DomainError("provider response must contain text or tool calls")
 
 
 @dataclass(frozen=True, slots=True)

@@ -21,6 +21,26 @@ const toolLabels = {
   get_references: "ارجاع‌های صریح",
   temporal_check: "کنترل زمانی نسخه",
   aggregate_count: "شمارش قطعی",
+  find_in_document: "جست‌وجو در سند",
+  read_span: "خواندن تکه",
+  list_document_contents: "فهرست مواد سند",
+  get_document_structure: "نقشه درختی سند",
+  list_documents: "فهرست اسناد",
+  get_statute_family: "خانواده قانون",
+  get_related: "مواد مرتبط",
+  expand_search_terms: "گسترش واژگان",
+  semantic_search: "جست‌وجوی معنایی",
+  graph_stats: "آمار گراف",
+  find_nodes: "یافتن گره",
+  search_laws: "جست‌وجوی موضوعی قوانین",
+  list_provisions: "فهرست مواد گراف",
+  get_provision_text: "متن ماده (گراف)",
+  search_judgments: "جست‌وجوی آرای قضایی",
+  judgments_for_law: "آرای مرتبط با قانون",
+  get_judgment_text: "متن رأی/نظریه",
+  node_neighbors: "همسایه‌های گره",
+  find_paths: "یافتن مسیر",
+  run_cypher: "کوئری Cypher",
 };
 const eventLabels = {
   started: "شروع پژوهش",
@@ -107,7 +127,9 @@ function renderResearch(data) {
   clear(byId("issues-list"));
   for (const issue of issues) byId("issues-list").append(text("div", `${issue.code}: ${issue.message}`, "issue"));
   renderTrace(data);
-  byId("result-area").scrollIntoView({ behavior: "smooth", block: "start" });
+  if (!byId("research-panel").classList.contains("is-live")) {
+    byId("result-area").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 }
 
 async function loadHistory() {
@@ -144,9 +166,15 @@ async function reopenResearch(episodeId) {
   try {
     const { organizationId } = credentials();
     const data = await request(`/v1/organizations/${encodeURIComponent(organizationId)}/research/${encodeURIComponent(episodeId)}`);
-    renderResearch(data);
-    selectPanel("trace-panel");
-    toast("پرونده پژوهشی بازیابی شد.");
+    if (Array.isArray(data.live) && data.live.length) {
+      selectPanel("research-panel");
+      restoreLiveStage(data);
+      toast("پرونده پژوهش زنده بازیابی شد.");
+    } else {
+      renderResearch(data);
+      selectPanel("trace-panel");
+      toast("پرونده پژوهشی بازیابی شد.");
+    }
   } catch (error) { toast(error.message, true); }
 }
 
@@ -344,8 +372,30 @@ function renderTrace(data) {
   }
 }
 
+function clearResearchView() {
+  state.research = null;
+  show(byId("result-area"), false);
+  clear(byId("answer-copy"));
+  clear(byId("claim-list"));
+  clear(byId("citation-grid"));
+  clear(byId("issues-list"));
+  show(byId("issues-card"), false);
+  byId("result-meta").textContent = "";
+  byId("citation-count").textContent = "۰ منبع";
+  byId("result-status").textContent = "تکمیل‌شده";
+  byId("result-status").classList.remove("is-warning");
+  show(byId("trace-content"), false);
+  show(byId("trace-empty"));
+  clear(byId("trace-metrics"));
+  clear(byId("action-timeline"));
+  clear(byId("evidence-list"));
+  byId("episode-label").textContent = "هنوز پژوهشی اجرا نشده است";
+  byId("trace-count").textContent = "۰";
+}
+
 async function runResearch(event) {
   event.preventDefault();
+  clearResearchView();
   const button = byId("research-submit");
   button.disabled = true; button.querySelector("span").textContent = "در حال پژوهش…";
   try {
@@ -369,14 +419,386 @@ async function runResearch(event) {
   finally { button.disabled = false; button.querySelector("span").textContent = "شروع پژوهش"; }
 }
 
-function liveStep(label, detail) {
-  const list = byId("live-steps-list");
-  const item = document.createElement("li"); item.className = "live-step";
-  const body = document.createElement("div"); body.className = "live-step-body";
-  body.append(text("strong", label), text("span", detail || ""));
-  item.append(text("span", faNumber.format(list.children.length + 1), "timeline-index"), body);
-  list.append(item);
-  item.scrollIntoView({ block: "nearest" });
+const liveGraph = { network: null, nodes: null, edges: null, seenNodes: new Set(), seenEdges: new Set() };
+
+const GRAPH_LABEL_COLORS = {
+  instrument: "#3f8ed6", provision: "#7fa8c9", judgment: "#d9534f",
+  opinion: "#9a6ac9", domain: "#3fa66a", authority: "#d98a2b", node: "#8fa8bd",
+};
+const GRAPH_LABEL_NAMES = {
+  instrument: "قانون", provision: "ماده", judgment: "رأی",
+  opinion: "نظریه", domain: "دامنه", authority: "مرجع", node: "گره",
+};
+
+function renderLiveLegend() {
+  const legend = byId("live-graph-legend");
+  if (!legend || legend.children.length) return;
+  clear(legend);
+  for (const [key, name] of Object.entries(GRAPH_LABEL_NAMES)) {
+    if (key === "node") continue;
+    const item = document.createElement("span"); item.className = "legend-item";
+    const dot = document.createElement("i"); dot.className = "legend-dot";
+    dot.style.backgroundColor = GRAPH_LABEL_COLORS[key];
+    item.append(dot, text("span", name)); legend.append(item);
+  }
+}
+
+function ensureLiveGraph() {
+  const canvas = byId("live-graph");
+  if (!canvas || typeof vis === "undefined") return null;
+  if (liveGraph.network) return liveGraph;
+  liveGraph.nodes = new vis.DataSet();
+  liveGraph.edges = new vis.DataSet();
+  liveGraph.network = new vis.Network(
+    canvas,
+    { nodes: liveGraph.nodes, edges: liveGraph.edges },
+    {
+      autoResize: true,
+      physics: { solver: "barnesHut", barnesHut: { gravitationalConstant: -3000, springLength: 90, avoidOverlap: 0.4 }, stabilization: { enabled: true, iterations: 140 } },
+      interaction: { hover: true, tooltipDelay: 140, dragNodes: true },
+      nodes: { shape: "dot", size: 12, font: { color: "#e6edf3", size: 11, face: "Vazirmatn", strokeWidth: 3, strokeColor: "#0d1418" } },
+      edges: { font: { size: 0 }, arrows: { to: { enabled: true, scaleFactor: 0.5 } }, color: { color: "#5c7a74", highlight: "#4cc2ff" } },
+    }
+  );
+  liveGraph.network.on("click", (params) => {
+    if (params.nodes.length) {
+      window.open(`/ui/explore.html?focus=${encodeURIComponent(params.nodes[0])}&run=1`, "_blank");
+    }
+  });
+  renderLiveLegend();
+  window.setTimeout(() => { if (liveGraph.network) liveGraph.network.fit({ animation: false }); }, 80);
+  return liveGraph;
+}
+
+function liveGraphAdd(event) {
+  const graph = ensureLiveGraph();
+  if (!graph) return;
+  const stepNodes = new Set((event.nodes || []).map((node) => node.id));
+  for (const node of event.nodes || []) {
+    if (!node || !node.id || liveGraph.seenNodes.has(node.id)) continue;
+    liveGraph.seenNodes.add(node.id);
+    graph.nodes.add({
+      id: node.id,
+      label: (node.title || node.id).slice(0, 28),
+      title: `${GRAPH_LABEL_NAMES[node.label] || node.label || "گره"}: ${node.title || node.id}`,
+      color: { background: GRAPH_LABEL_COLORS[node.label] || GRAPH_LABEL_COLORS.node, border: "#0d1418" },
+      nodeLabel: node.label,
+    });
+  }
+  for (const edge of event.edges || []) {
+    if (!edge || !edge.source || !edge.target) continue;
+    const id = `${edge.source}->${edge.target}:${edge.rel || ""}`;
+    if (liveGraph.seenEdges.has(id)) continue;
+    liveGraph.seenEdges.add(id);
+    graph.edges.add({ id, from: edge.source, to: edge.target, label: edge.rel || "", title: edge.rel || "" });
+  }
+  const updates = [];
+  liveGraph.nodes.forEach((node) => {
+    const active = stepNodes.has(node.id);
+    const color = GRAPH_LABEL_COLORS[node.nodeLabel] || GRAPH_LABEL_COLORS.node;
+    updates.push({
+      id: node.id,
+      borderWidth: active ? 3 : 1,
+      shadow: active ? { enabled: true, color: "rgba(76,194,255,.9)", size: 18, x: 0, y: 0 } : { enabled: false },
+      color: { background: active ? "#ffffff" : color, border: active ? "#4cc2ff" : "#0d1418" },
+      font: { color: active ? "#0d1418" : "#e6edf3", size: 11, face: "Vazirmatn", strokeWidth: 3, strokeColor: active ? "#ffffff" : "#0d1418", bold: active },
+    });
+  });
+  if (updates.length) liveGraph.nodes.update(updates);
+  if (graph.network) graph.network.fit({ animation: { duration: 250 } });
+}
+
+function resetLiveGraph() {
+  if (liveGraph.nodes) liveGraph.nodes.clear();
+  if (liveGraph.edges) liveGraph.edges.clear();
+  liveGraph.seenNodes = new Set();
+  liveGraph.seenEdges = new Set();
+}
+
+const DIAGRAM_NODE = { w: 196, h: 62, gapX: 26, gapY: 64, margin: 34 };
+const DIAGRAM_VIEW = { w: 1000, h: 560 };
+const liveDiagram = { steps: [], active: -1, positions: [], edgePaths: [], token: null, animating: null };
+
+function liveStepKind(event) {
+  if (event.type === "started") return "start";
+  if (event.type === "answer") return "answer";
+  if (event.type === "verification_rejected" || event.type === "verification_accepted") return "verify";
+  if (event.type === "tool_error" || event.type === "contract_error" || event.type === "abstained") return "error";
+  return "tool";
+}
+
+function liveStepTitle(event) {
+  if (event.type === "started") return "شروع پژوهش";
+  if (event.type === "answer") return "پاسخ نهایی";
+  if (event.type === "tool_call" || event.type === "tool_error") return toolLabels[event.tool] || event.tool || "ابزار";
+  if (event.type === "contract_error") return eventLabels.contract_error;
+  if (event.type === "verification_rejected") return "راستی‌آزمایی — ادامه تحقیق";
+  if (event.type === "verification_accepted") return "راستی‌آزمایی پذیرفته شد";
+  if (event.type === "abstained") return "امتناع صریح";
+  return eventLabels[event.type] || event.type;
+}
+
+function liveStepBadge(event) {
+  if (event.type === "tool_call") {
+    const coverage = event.total_count == null
+      ? `${faNumber.format(event.returned_count || 0)} نتیجه`
+      : `${faNumber.format(event.returned_count || 0)} از ${faNumber.format(event.total_count)}`;
+    return event.complete === false ? `${coverage} · ناکامل` : coverage;
+  }
+  if (event.type === "tool_error") return "خطا";
+  if (event.type === "verification_rejected") return "رد شد";
+  if (event.type === "verification_accepted") return "پذیرفته";
+  if (event.type === "abstained") return "امتناع";
+  if (event.type === "answer") return "نتیجه";
+  if (event.type === "started") return "آغاز";
+  return "";
+}
+
+function diagramColumns(count, containerAspect) {
+  const { w, h, gapX, gapY } = DIAGRAM_NODE;
+  let best = 1;
+  let bestScore = Infinity;
+  for (let cols = 1; cols <= Math.min(count, 5); cols += 1) {
+    const rows = Math.ceil(count / cols);
+    const aspect = (cols * w + (cols - 1) * gapX) / (rows * h + (rows - 1) * gapY);
+    const score = Math.abs(Math.log(aspect / (containerAspect || 1.7)));
+    if (score < bestScore) { bestScore = score; best = cols; }
+  }
+  return best;
+}
+
+function diagramPositions(count, cols) {
+  const { w, h, gapX, gapY, margin } = DIAGRAM_NODE;
+  const span = Math.max(1, Math.min(cols || 1, count));
+  const positions = [];
+  for (let i = 0; i < count; i += 1) {
+    const row = Math.floor(i / span);
+    const pos = i % span;
+    const col = row % 2 === 0 ? pos : span - 1 - pos;
+    positions.push({
+      x: DIAGRAM_VIEW.w - margin - w / 2 - col * (w + gapX),
+      y: margin + h / 2 + row * (h + gapY),
+    });
+  }
+  return positions;
+}
+
+function diagramEdgePath(a, b) {
+  const midX = (a.x + b.x) / 2;
+  return `M ${a.x} ${a.y} C ${midX} ${a.y}, ${midX} ${b.y}, ${b.x} ${b.y}`;
+}
+
+function svgText(className, x, y, value) {
+  const node = document.createElementNS(svgNS, "text");
+  if (className) node.setAttribute("class", className);
+  node.setAttribute("x", x); node.setAttribute("y", y);
+  node.setAttribute("text-anchor", "middle"); node.setAttribute("direction", "rtl");
+  node.textContent = value;
+  return node;
+}
+
+function renderLiveDiagram() {
+  const svg = byId("live-diagram");
+  if (!svg) return;
+  clear(svg);
+  const wrap = svg.parentElement;
+  const aspect = wrap && wrap.clientHeight ? wrap.clientWidth / wrap.clientHeight : 1.7;
+  const cols = diagramColumns(liveDiagram.steps.length, aspect);
+  const positions = diagramPositions(liveDiagram.steps.length, cols);
+  liveDiagram.positions = positions;
+  if (positions.length) {
+    const { w, h } = DIAGRAM_NODE;
+    const pad = 52;
+    const xs = positions.map((p) => p.x);
+    const ys = positions.map((p) => p.y);
+    let minX = Math.min(...xs) - w / 2 - pad;
+    let maxX = Math.max(...xs) + w / 2 + pad;
+    let minY = Math.min(...ys) - h / 2 - pad;
+    let maxY = Math.max(...ys) + h / 2 + pad;
+    const minW = 560; const minH = 320;
+    if (maxX - minX < minW) { const c = (minX + maxX) / 2; minX = c - minW / 2; maxX = c + minW / 2; }
+    if (maxY - minY < minH) { const c = (minY + maxY) / 2; minY = c - minH / 2; maxY = c + minH / 2; }
+    svg.setAttribute("viewBox", `${minX} ${minY} ${maxX - minX} ${maxY - minY}`);
+  } else {
+    svg.setAttribute("viewBox", `0 0 ${DIAGRAM_VIEW.w} ${DIAGRAM_VIEW.h}`);
+  }
+  const edgeLayer = document.createElementNS(svgNS, "g");
+  const nodeLayer = document.createElementNS(svgNS, "g");
+  liveDiagram.edgePaths = [];
+  for (let i = 1; i < positions.length; i += 1) {
+    const path = document.createElementNS(svgNS, "path");
+    path.setAttribute("d", diagramEdgePath(positions[i - 1], positions[i]));
+    path.setAttribute("class", "dgm-edge" + (i <= liveDiagram.active ? " is-done" : ""));
+    edgeLayer.append(path);
+    liveDiagram.edgePaths.push(path);
+  }
+  const { w, h } = DIAGRAM_NODE;
+  liveDiagram.steps.forEach((step, index) => {
+    const { x, y } = positions[index];
+    const group = document.createElementNS(svgNS, "g");
+    group.setAttribute("class", "dgm-node is-" + step.kind
+      + (index < liveDiagram.active ? " is-done" : "")
+      + (index === liveDiagram.active ? " is-active" : ""));
+    const halo = document.createElementNS(svgNS, "circle");
+    halo.setAttribute("class", "dgm-halo");
+    halo.setAttribute("cx", x); halo.setAttribute("cy", y); halo.setAttribute("r", 22);
+    const rect = document.createElementNS(svgNS, "rect");
+    rect.setAttribute("x", x - w / 2); rect.setAttribute("y", y - h / 2);
+    rect.setAttribute("width", w); rect.setAttribute("height", h);
+    rect.setAttribute("rx", 12); rect.setAttribute("ry", 12);
+    const sub = step.badge || step.sub || "";
+    group.append(halo, rect,
+      svgText("dgm-node-title", x, y - 5, (step.title || "").slice(0, 26)),
+      svgText("dgm-node-sub", x, y + 15, sub.slice(0, 30)));
+    group.addEventListener("click", () => showStepDetail(step.event, step));
+    nodeLayer.append(group);
+  });
+  const token = document.createElementNS(svgNS, "circle");
+  token.setAttribute("class", "dgm-token");
+  token.setAttribute("r", 6);
+  const anchor = positions[Math.max(0, liveDiagram.active)] || { x: -30, y: -30 };
+  token.setAttribute("cx", anchor.x); token.setAttribute("cy", anchor.y);
+  svg.append(edgeLayer, nodeLayer, token);
+  liveDiagram.token = token;
+}
+
+function animateToNode(index) {
+  const token = liveDiagram.token;
+  const positions = liveDiagram.positions;
+  if (!token || !positions.length) return;
+  if (liveDiagram.animating) { cancelAnimationFrame(liveDiagram.animating); liveDiagram.animating = null; }
+  const to = positions[index];
+  const from = positions[index - 1] || to;
+  const edge = liveDiagram.edgePaths[index - 1];
+  if (edge) edge.classList.add("dgm-edge-flow");
+  const total = edge ? edge.getTotalLength() : 0;
+  const duration = 480;
+  const start = performance.now();
+  const tick = (now) => {
+    const t = Math.min(1, (now - start) / duration);
+    const eased = 1 - Math.pow(1 - t, 3);
+    let point = { x: from.x + (to.x - from.x) * eased, y: from.y + (to.y - from.y) * eased };
+    if (edge && total) point = edge.getPointAtLength(total * eased);
+    token.setAttribute("cx", point.x); token.setAttribute("cy", point.y);
+    if (t < 1) {
+      liveDiagram.animating = requestAnimationFrame(tick);
+    } else {
+      liveDiagram.animating = null;
+      if (edge) edge.classList.remove("dgm-edge-flow");
+    }
+  };
+  liveDiagram.animating = requestAnimationFrame(tick);
+}
+
+function buildStepBody(event) {
+  const body = document.createElement("div");
+  body.className = "live-step-body";
+  if (event.thought) body.append(text("div", event.thought, "live-thought"));
+  const detail = describeEvent(event);
+  if (detail) body.append(text("span", detail, "live-detail"));
+  if (event.type === "tool_call" || event.type === "tool_error") {
+    if (event.args && Object.keys(event.args).length) {
+      body.append(text("code", JSON.stringify(event.args), "live-args"));
+    }
+    const queries = Array.isArray(event.cypher) ? event.cypher.map((entry) => entry.query).filter(Boolean) : [];
+    if (queries.length) {
+      const pre = document.createElement("pre"); pre.className = "live-cypher";
+      pre.textContent = queries.join("\n\n");
+      body.append(pre);
+    }
+  }
+  if (!body.children.length) body.append(text("span", "جزئیاتی برای نمایش نیست.", "live-detail"));
+  return body;
+}
+
+function showStepDetail(event, step) {
+  const box = byId("live-step-detail");
+  if (!box) return;
+  clear(box);
+  const head = document.createElement("div"); head.className = "detail-head";
+  const badge = text("span", (step && step.badge) || liveStepBadge(event) || event.type, "detail-badge");
+  const kind = step ? step.kind : liveStepKind(event);
+  if (kind === "error") badge.classList.add("is-error");
+  else if (kind === "answer" || kind === "verify") badge.classList.add("is-ok");
+  head.append(text("strong", liveStepTitle(event)), badge);
+  box.append(head, buildStepBody(event));
+}
+
+function resetLiveDiagram() {
+  if (liveDiagram.animating) { cancelAnimationFrame(liveDiagram.animating); liveDiagram.animating = null; }
+  liveDiagram.steps = []; liveDiagram.active = -1; liveDiagram.positions = []; liveDiagram.edgePaths = []; liveDiagram.token = null;
+  const svg = byId("live-diagram"); if (svg) clear(svg);
+}
+
+function appendLiveEvent(event, animate = true) {
+  const step = { kind: liveStepKind(event), title: liveStepTitle(event), badge: liveStepBadge(event), event };
+  liveDiagram.steps.push(step);
+  liveDiagram.active = liveDiagram.steps.length - 1;
+  renderLiveDiagram();
+  if (animate) {
+    animateToNode(liveDiagram.active);
+  } else {
+    const pos = liveDiagram.positions[liveDiagram.active];
+    if (liveDiagram.token && pos) {
+      liveDiagram.token.setAttribute("cx", pos.x);
+      liveDiagram.token.setAttribute("cy", pos.y);
+    }
+  }
+  showStepDetail(event, step);
+  const count = byId("stage-step-count");
+  if (count) count.textContent = `${faNumber.format(liveDiagram.steps.length)} گام`;
+  if (event.type === "tool_call") liveGraphAdd(event);
+}
+
+function setStageStatus(kind, label) {
+  const status = byId("stage-status");
+  if (!status) return;
+  status.className = "stage-stat is-" + kind;
+  clear(status);
+  if (kind === "running") {
+    const dot = document.createElement("i"); dot.setAttribute("aria-hidden", "true");
+    status.append(dot);
+  }
+  status.append(text("span", label));
+}
+
+function enterLiveStage(question) {
+  clearResearchView();
+  byId("research-panel").classList.add("is-live");
+  byId("live-stage").classList.remove("is-hidden");
+  byId("stage-question-text").textContent = question || "—";
+  setStageStatus("running", "در حال اجرا");
+  resetLiveDiagram();
+  resetLiveGraph();
+  const count = byId("stage-step-count"); if (count) count.textContent = "۰ گام";
+  const detail = byId("live-step-detail");
+  clear(detail); detail.append(text("div", "در انتظار نخستین گام…", "detail-placeholder"));
+  window.setTimeout(() => { if (liveGraph.network) liveGraph.network.fit({ animation: false }); }, 120);
+}
+
+function exitLiveStage() {
+  byId("research-panel").classList.remove("is-live");
+  byId("live-stage").classList.add("is-hidden");
+  resetLiveDiagram();
+  resetLiveGraph();
+  clearResearchView();
+}
+
+function finishLiveStage(result) {
+  const complete = Boolean(result && result.completed);
+  setStageStatus(complete ? "done" : "warning", complete ? "راستی‌آزمایی‌شده" : "نیازمند پژوهش بیشتر");
+  appendLiveEvent({ type: "answer", completed: complete, answer: result && result.answer });
+}
+
+function restoreLiveStage(payload) {
+  const question = (payload.trace && payload.trace.question) || "—";
+  enterLiveStage(question);
+  const events = Array.isArray(payload.live) ? payload.live : [];
+  for (const event of events) {
+    if (event && event.type) appendLiveEvent(event, false);
+  }
+  finishLiveStage(payload);
+  renderResearch(payload);
 }
 
 function describeEvent(event) {
@@ -388,49 +810,62 @@ function describeEvent(event) {
   }
   if (event.type === "tool_error") return `${toolLabels[event.tool] || event.tool}: ${event.error}`;
   if (event.type === "verification_rejected") return (event.issues || []).map((issue) => issue.code).join("، ");
+  if (event.type === "verification_accepted") return "همه ادعاها به شاهد معتبر متصل شدند.";
   if (event.type === "abstained") return event.reason || "";
   if (event.type === "contract_error") return event.message || "";
+  if (event.type === "started") return event.episode_id || "";
+  if (event.type === "answer") {
+    const claims = (event.answer && event.answer.claims && event.answer.claims.length) || 0;
+    const citations = (event.answer && event.answer.citations && event.answer.citations.length) || 0;
+    return `پاسخ با ${faNumber.format(claims)} ادعا و ${faNumber.format(citations)} منبع`;
+  }
   return "";
 }
 
 async function runResearchStream(body) {
   credentials();
-  byId("live-steps").classList.remove("is-hidden");
-  clear(byId("live-steps-list"));
+  enterLiveStage(body.question);
   const payload = { ...body, strategy: "agentic" };
-  const response = await fetch("/v1/research/stream", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!response.ok || !response.body) {
-    let detail = `خطای سرویس (${response.status})`;
-    try { const data = await response.json(); detail = data.detail || detail; } catch {}
-    throw new Error(detail);
-  }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let result = null;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let index;
-    while ((index = buffer.indexOf("\n\n")) !== -1) {
-      const frame = buffer.slice(0, index); buffer = buffer.slice(index + 2);
-      const dataLine = frame.split("\n").find((line) => line.startsWith("data: "));
-      if (!dataLine) continue;
-      let event;
-      try { event = JSON.parse(dataLine.slice(6)); } catch { continue; }
-      if (event.type === "result") { result = event.data; continue; }
-      if (event.type === "failed") throw new Error(event.message || "پژوهش ناتمام ماند.");
-      liveStep(eventLabels[event.type] || event.type, describeEvent(event));
+  try {
+    const response = await fetch("/v1/research/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok || !response.body) {
+      let detail = `خطای سرویس (${response.status})`;
+      try { const data = await response.json(); detail = data.detail || detail; } catch {}
+      throw new Error(detail);
     }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let result = null;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let index;
+      while ((index = buffer.indexOf("\n\n")) !== -1) {
+        const frame = buffer.slice(0, index); buffer = buffer.slice(index + 2);
+        const dataLine = frame.split("\n").find((line) => line.startsWith("data: "));
+        if (!dataLine) continue;
+        let event;
+        try { event = JSON.parse(dataLine.slice(6)); } catch { continue; }
+        if (!event || !event.type) continue;
+        if (event.type === "result") { result = event.data; continue; }
+        if (event.type === "failed") throw new Error(event.message || "پژوهش ناتمام ماند.");
+        appendLiveEvent(event);
+      }
+    }
+    if (!result) throw new Error("پاسخی از جریان پژوهش دریافت نشد.");
+    finishLiveStage(result);
+    renderResearch(result);
+    toast(result.completed ? "پژوهش زنده با موفقیت تکمیل شد." : "پژوهش ناتمام ماند؛ جزئیات را ببینید.", !result.completed);
+  } catch (error) {
+    setStageStatus("warning", "خطای پژوهش");
+    throw error;
   }
-  if (!result) throw new Error("پاسخی از جریان پژوهش دریافت نشد.");
-  renderResearch(result);
-  toast(result.completed ? "پژوهش زنده با موفقیت تکمیل شد." : "پژوهش ناتمام ماند؛ جزئیات را ببینید.", !result.completed);
 }
 
 async function loadLibrary(event) {
@@ -751,6 +1186,10 @@ byId("refresh-graph").addEventListener("click", loadResearchGraph);
 byId("review-form").addEventListener("submit", submitReview);
 byId("llm-settings-form").addEventListener("submit", saveLLMSettings);
 byId("llm-test-button").addEventListener("click", testLLMSettings);
+byId("stage-reset").addEventListener("click", exitLiveStage);
+window.addEventListener("resize", () => {
+  if (!byId("live-stage").classList.contains("is-hidden") && liveDiagram.steps.length) renderLiveDiagram();
+});
 byId("applicable-time").value = new Date().toISOString().slice(0, 10);
 byId("library-date").value = byId("applicable-time").value;
 byId("applicable-time").value = new Date().toISOString().slice(0, 10);

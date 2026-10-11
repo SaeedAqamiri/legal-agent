@@ -265,6 +265,114 @@ class OpenAICompatibleGatewayTests(unittest.TestCase):
         with self.assertRaises(LLMResponseFormatError):
             OpenAICompatibleGateway(transport).generate(provider(), profile(), request())
 
+    def test_parses_native_tool_calls_when_content_is_empty(self) -> None:
+        transport = FakeTransport(
+            JsonHttpResponse(
+                200,
+                {},
+                {
+                    "id": "chat-tools",
+                    "model": "deepseek-v4.1-flash",
+                    "choices": [
+                        {
+                            "finish_reason": "tool_calls",
+                            "message": {
+                                "content": "",
+                                "tool_calls": [
+                                    {
+                                        "id": "call-1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "search_laws",
+                                            "arguments": '{"topic": "محیط زیست"}',
+                                        },
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                },
+            )
+        )
+        gateway = OpenAICompatibleGateway(transport)
+
+        result = gateway.generate(
+            provider(EndpointStyle.CHAT_COMPLETIONS),
+            profile(EndpointStyle.CHAT_COMPLETIONS),
+            request(),
+        )
+
+        self.assertEqual(result.text, "")
+        self.assertEqual(len(result.tool_calls), 1)
+        self.assertEqual(result.tool_calls[0].name, "search_laws")
+        self.assertEqual(result.tool_calls[0].arguments, '{"topic": "محیط زیست"}')
+        self.assertEqual(result.tool_calls[0].id, "call-1")
+
+    def test_declares_native_tools_in_chat_payload(self) -> None:
+        transport = FakeTransport(
+            JsonHttpResponse(
+                200,
+                {},
+                {
+                    "id": "chat-t",
+                    "model": "m",
+                    "choices": [{"message": {"content": "ok"}}],
+                    "usage": {},
+                },
+            )
+        )
+        gateway = OpenAICompatibleGateway(transport)
+        tools = (
+            {
+                "type": "function",
+                "function": {
+                    "name": "graph_stats",
+                    "description": "آمار",
+                    "parameters": {"type": "object", "properties": {}, "required": []},
+                },
+            },
+        )
+
+        gateway.generate(
+            provider(EndpointStyle.CHAT_COMPLETIONS),
+            profile(EndpointStyle.CHAT_COMPLETIONS),
+            GenerationRequest("system", "user", tools=tools),
+        )
+
+        _, _, payload, _ = transport.calls[0]
+        self.assertEqual(payload["tools"][0]["function"]["name"], "graph_stats")
+        self.assertEqual(payload["tool_choice"], "auto")
+
+    def test_force_answer_sends_tool_choice_none(self) -> None:
+        transport = FakeTransport(
+            JsonHttpResponse(
+                200,
+                {},
+                {
+                    "id": "chat-none",
+                    "model": "m",
+                    "choices": [{"message": {"content": "پاسخ"}}],
+                    "usage": {},
+                },
+            )
+        )
+        gateway = OpenAICompatibleGateway(transport)
+
+        gateway.generate(
+            provider(EndpointStyle.CHAT_COMPLETIONS),
+            profile(EndpointStyle.CHAT_COMPLETIONS),
+            GenerationRequest(
+                "system",
+                "user",
+                tools=({"type": "function", "function": {"name": "t", "parameters": {}}},),
+                tool_choice="none",
+            ),
+        )
+
+        _, _, payload, _ = transport.calls[0]
+        self.assertEqual(payload["tool_choice"], "none")
+
 
 class LLMServiceTests(unittest.TestCase):
     def test_routes_active_profile_and_returns_full_audit_identity(self) -> None:

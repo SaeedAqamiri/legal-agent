@@ -56,6 +56,14 @@ class CanonicalRepository(ABC):
     @abstractmethod
     def get_instrument(self, instrument_id: str) -> LegalInstrument: ...
 
+    def list_instrument_titles(self) -> tuple[str, ...]:
+        """Known instrument titles for cross-law reference resolution.
+
+        Optional capability — the base implementation returns an empty
+        catalog (the reference extractor then behaves exactly as before).
+        """
+        return ()
+
     @abstractmethod
     def get_source_document(self, source_document_id: str) -> SourceDocument: ...
 

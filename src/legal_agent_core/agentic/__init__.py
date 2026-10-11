@@ -5,6 +5,7 @@ The publish gate (``CitationPipeline``) still applies to every answer this
 loop produces; the agent can never bypass evidence verification.
 """
 
+from .composite import CompositeTools
 from .envelope import (
     ITEMS_IN_CONTEXT,
     Envelope,
@@ -19,7 +20,7 @@ from .graph_chat import (
     GraphChatResult,
     GraphChatService,
 )
-from .graph_tools import GRAPH_TOOL_SPECS, GraphTools
+from .graph_tools import GRAPH_TOOL_SPECS, GraphTools, harvest_refs
 from .loop import (
     AgenticConfig,
     IncompleteReason,
@@ -34,6 +35,7 @@ __all__ = [
     "GRAPH_TOOL_SPECS",
     "ITEMS_IN_CONTEXT",
     "AgenticConfig",
+    "CompositeTools",
     "Envelope",
     "GraphChatConfig",
     "GraphChatLoop",
@@ -53,6 +55,7 @@ __all__ = [
     "ToolStatus",
     "all_skills",
     "empty_envelope",
+    "harvest_refs",
     "make_envelope",
     "select_skill",
 ]

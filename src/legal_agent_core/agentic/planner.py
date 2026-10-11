@@ -8,6 +8,7 @@ Anything else is a contract violation that the loop feeds back verbatim.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -17,6 +18,7 @@ from ..llm import (
     ModelProfile,
     ProviderConfig,
     ProviderResponse,
+    ToolCall,
 )
 
 SUFFICIENCY_LEVELS = ("full", "partial", "insufficient")
@@ -58,7 +60,9 @@ class PlannerTurn:
 
 
 class ToolPlanner(Protocol):
-    def decide(self, system_prompt: str, user_prompt: str) -> PlannerTurn: ...
+    def decide(
+        self, system_prompt: str, user_prompt: str, *, force_answer: bool = False
+    ) -> PlannerTurn: ...
 
 
 class LLMToolPlanner:
@@ -70,19 +74,41 @@ class LLMToolPlanner:
         provider: ProviderConfig,
         profile: ModelProfile,
         agent_version: str = "legal-agent-core/0.1",
+        *,
+        tools: Sequence[Mapping[str, Any]] = (),
+        allow_text_answer: bool = False,
     ) -> None:
         self.gateway = gateway
         self.provider = provider
         self.profile = profile
         self.agent_version = agent_version
+        #: Native tool schemas declared to the provider. When present the model
+        #: answers with native ``tool_calls`` instead of the JSON text contract.
+        self.tools = tuple(tools)
+        #: Accept a plain-text model response as the final answer (used by the
+        #: graph-guide chat, whose answers are prose, not the JSON contract).
+        self.allow_text_answer = allow_text_answer
 
-    def decide(self, system_prompt: str, user_prompt: str) -> PlannerTurn:
-        response = self.gateway.generate(
-            self.provider,
-            self.profile,
-            GenerationRequest(system_prompt, user_prompt),
+    def decide(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        force_answer: bool = False,
+    ) -> PlannerTurn:
+        request = GenerationRequest(
+            system_prompt,
+            user_prompt,
+            tools=self.tools,
+            tool_choice="none" if force_answer else None,
         )
-        decision, contract_error = _parse_decision(response)
+        response = self.gateway.generate(self.provider, self.profile, request)
+        if response.tool_calls:
+            decision, contract_error = _decision_from_tool_calls(response.tool_calls)
+        else:
+            decision, contract_error = _parse_decision(
+                response, allow_text_answer=self.allow_text_answer
+            )
         return PlannerTurn(
             decision=decision,
             contract_error=contract_error,
@@ -101,12 +127,39 @@ class LLMToolPlanner:
         )
 
 
+def _decision_from_tool_calls(
+    calls: tuple[ToolCall, ...],
+) -> tuple[PlannerDecision | None, str | None]:
+    """Honour a provider-native tool call as a planner tool decision.
+
+    Some reasoning models (e.g. deepseek-v4.1-flash) answer a tool-style prompt
+    with native function calls and an empty ``content`` instead of the
+    JSON-in-text contract. Only the first call is consumed; the loop runs one
+    tool per step.
+    """
+    call = calls[0]
+    raw = call.arguments.strip()
+    if not raw:
+        return PlannerDecision("tool", tool=call.name, args={}), None
+    try:
+        args = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return None, f"tool call arguments are not valid JSON: {exc.msg}"
+    if not isinstance(args, dict):
+        return None, "tool call arguments must be a JSON object"
+    return PlannerDecision("tool", tool=call.name, args=args), None
+
+
 def _parse_decision(
     response: ProviderResponse,
+    *,
+    allow_text_answer: bool = False,
 ) -> tuple[PlannerDecision | None, str | None]:
     raw = response.text
     start = raw.find("{")
     if start == -1:
+        if allow_text_answer and raw.strip():
+            return PlannerDecision("answer", answer=raw.strip()), None
         return None, "planner output contains no JSON object"
     # raw_decode parses the FIRST complete JSON object and ignores any
     # trailing commentary — models routinely append prose (sometimes with

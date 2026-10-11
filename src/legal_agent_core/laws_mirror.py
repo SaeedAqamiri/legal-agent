@@ -120,7 +120,7 @@ def _sync_judgments(connection, falkor_graph, batch_size: int, log) -> None:
             data = json.loads(output) if isinstance(output, str) else output
         except (TypeError, ValueError):
             continue
-        _, external_id, title, doc_kind, category, summary = doc
+        _, _external_id, title, doc_kind, category, summary = doc
         label = "AdvisoryOpinion" if (doc_kind != "judgment" or "نظریه" in (title or "")) else "Judgment"
         judgments[str(document_uid)] = [str(document_uid), (title or "")[:300], label, (category or "")[:60], summary]
         for citation in data.get("citations", []) + data.get("basis", []):
@@ -159,6 +159,17 @@ def _sync_judgments(connection, falkor_graph, batch_size: int, log) -> None:
     log(
         f"judgments: {len(judgments)} nodes, {len(cite_pairs)} CITES pairs wired"
     )
+
+
+def _tier_as_int(value):
+    """Postgres stores authority_level as text ('4'); numeric strings become
+    ints so Cypher accepts both tier=4 and tier='4'."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return value
 
 
 def sync_laws_mirror(connection, falkor_graph, batch_size: int = 2000, log=_log) -> dict:
@@ -212,7 +223,7 @@ def sync_laws_mirror(connection, falkor_graph, batch_size: int = 2000, log=_log)
     ):
         try:
             falkor_graph.query(statement)
-        except Exception as exc:  # noqa: BLE001 — indexes persist across rebuilds
+        except Exception as exc:
             if "already indexed" in str(exc).lower():
                 continue
             raise
@@ -228,7 +239,7 @@ def sync_laws_mirror(connection, falkor_graph, batch_size: int = 2000, log=_log)
                                      tier: row[3], issuer: row[4],
                                      provisions: row[5], url: row[6],
                                      domain: row[7], summary: row[8]})""",
-        [list(row) for row in instruments],
+        [[*row[:3], _tier_as_int(row[3]), *row[4:]] for row in instruments],
         "instruments",
     )
     run_unwind(

@@ -32,6 +32,7 @@ class DeterministicReferenceExtractor:
         article_targets: Mapping[str, Sequence[str]],
         instrument_aliases: Sequence[str],
         source_provision_id: str,
+        known_titles: Sequence[str] = (),
     ) -> tuple[ReferenceMention, ...]:
         normalized = normalize_legal_text(text)
         aliases = tuple(
@@ -41,13 +42,25 @@ class DeterministicReferenceExtractor:
                 reverse=True,
             )
         )
+        titles = tuple(
+            sorted(
+                {normalize_legal_text(title) for title in known_titles if normalize_legal_text(title)},
+                key=len,
+                reverse=True,
+            )
+        )
         mentions: list[ReferenceMention] = []
         for match in _ARTICLE_REFERENCE.finditer(normalized):
             number = normalize_number(match.group("number")) or match.group("number")
             suffix = normalized[match.end() : match.end() + 120]
-            explicit_scope_end = self._scope_end(suffix, aliases)
+            scope_end = self._scope_end(suffix, aliases)
+            title_end = self._known_title_end(suffix, titles) if titles else 0
+            # A known *other* law name extends the captured mention (so the
+            # target law survives in target_text) but never enables
+            # provision-level resolution — only a self-scope does.
+            explicit_scope_end = max(scope_end, title_end)
             candidates = [item for item in article_targets.get(number, ()) if item != source_provision_id]
-            is_explicit_scope = explicit_scope_end > 0
+            is_explicit_scope = scope_end > 0
             resolved = candidates[0] if is_explicit_scope and len(candidates) == 1 else None
             if resolved:
                 status = ResolutionStatus.RESOLVED
@@ -59,7 +72,6 @@ class DeterministicReferenceExtractor:
                 status = ResolutionStatus.UNRESOLVED
                 confidence = 0.85
             end = match.end() + explicit_scope_end
-            head_len = match.end() - match.start()
             head = " ".join(
                 normalized[match.start() : match.end()]
                 .replace("(", " ")
@@ -91,5 +103,16 @@ class DeterministicReferenceExtractor:
         for alias in aliases:
             if stripped.startswith(alias):
                 return leading_space_count + len(alias)
+        return 0
+
+    @staticmethod
+    def _known_title_end(suffix: str, titles: Sequence[str]) -> int:
+        """Longest known-instrument title that the suffix starts with — captures
+        «ماده N قانون کار …» mentions whose target is another instrument."""
+        stripped = suffix.lstrip()
+        leading_space_count = len(suffix) - len(stripped)
+        for title in titles:  # longest first
+            if stripped.startswith(title):
+                return leading_space_count + len(title)
         return 0
 
