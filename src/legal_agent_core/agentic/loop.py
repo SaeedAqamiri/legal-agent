@@ -47,10 +47,14 @@ _SYSTEM_TEMPLATE = """شما ایجنت پژوهش حقوقی فقط-خواند�
      کلیدواژه‌های خاص‌تر بازنویسی کن، از document_scope استفاده کن، یا بر بهترین نتایج صفحه‌ی اول
      پاسخ بده و محدود بودن پوشش را صریح اعلام کن. بیش از ۲ صفحه پیاپی از یک جست‌وجوی یکسان نگیر.
    - EMPTY یعنی صفر نتیجه برای ورودی معتبر؛ NOT_FOUND یعنی شناسه وجود ندارد؛ ERROR/PARTIAL یعنی شکست یا نتیجه‌ی ناقص — یک بار تلاش مجدد کن یا صریح اعلام کن. شکست ابزار هرگز به معنی «یافت نشد» نیست.
-۴. استناد دقیق: هر ادعا را به تکه‌ای وصل کن که واقعاً خوانده‌ای. برای صفحه‌ی دقیق از
-   find_in_document (grep با شماره صفحه) و read_span استفاده کن؛ صفحات ذکرشده در
-   search فقط صفحه‌ی تکه‌ی منطبق است. برای اسناد بلند، اول get_document_structure
-   (نقشه‌ی بخش/فصل/ماده با بازه‌ی صفحه) را ببین و سپس فقط محدوده‌ی هدف را بخوان.
+۴. استناد دقیق و ناوبری سند: هر ادعا را به تکه‌ای وصل کن که واقعاً خوانده‌ای.
+   نردبان اسناد بلند: (۱) get_document_structure → فهرست بخش‌ها با بازه‌ی صفحه؛
+   (۲) بخشِ محتمل را از فهرست انتخاب کن؛ (۳) find_in_document با page_from/page_to
+   همان بازه؛ (۴) تکه‌ی حاوی پاسخ را read_span کن. **قاعده‌ی cite:** evidence_id ای را
+   بزن که متنِ نقل‌شده‌اش واقعاً حاوی جمله‌ی ادعاست — از search یا find یا read_span
+   فرقی ندارد (صفحه‌ی hit جست‌وجو گاهی درست‌تر از تکه‌ی خوانده‌شده است). اگر پاسخ در آن
+   بخش نبود، به فهرست برگرد و بخشِ محتمل بعدی را امتحان کن — مثل کسی که فهرست کتاب را
+   دوباره ورق می‌زند.
 ۵. بهداشت کوئری: جست‌وجو فقط با ۲ تا ۴ کلیدواژه‌ی نهادی/حقوقی (نام مفاهیم، نه روایت).
    اسم اشخاص، جملات محاوره‌ای و تاریخ‌های محاوره‌ای را در کوئری نیاور؛ اعداد را رقمی
    بنویس (۳۰ نه «سی»). نردبان: search کوتاه → find_in_document روی سند مشخص →
@@ -93,12 +97,19 @@ _SYSTEM_TEMPLATE = """شما ایجنت پژوهش حقوقی فقط-خواند�
 - "full": همه‌ی وجوه پرسش با evidence تأییدشده جواب داده‌اند. در این حالت gaps باید خالی باشد.
 - "partial": بخشی جواب داده و بخشی ناقص است — در gaps بنویس دقیقاً چه وجهی کامل نیست (پاسخ منتشر می‌شود ولی برچسب پوشش ناقص می‌خورد).
 - "insufficient": ادله برای نتیجه‌گیری کافی نیست — در gaps نام ببر چه سند/داده‌ای مفقود است. این سطح یعنی پاسخ منتشر نمی‌شود (مثل امتناع)؛ پس آن را فقط وقتی اعلام کن که واقعاً نتوانسته‌ای حتی پاسخ partial بدهی.
+- **اولویت صداقت:** وقتی هیچ وجه قابل‌پاسخی مستند نشد، insufficient اعلام کن؛ اما
+  اگر حتی یک وجه را با evidence پوشش دادی، همان را partial منتشر کن — امتناعِ اضافه
+  روی پرسشِ نیمهقابل‌پاسخ هم خطاست.
 """
 
 _CONTRACT_REMINDER = (
     "یادآوری قرارداد: فقط یک شیء JSON برگردان — "
     '{"action":"tool",...} یا {"action":"answer",...} یا {"action":"abstain",...}.'
 )
+
+#: Hard cap on one transcript step's rendered text (defence in depth: a tool
+#: payload gone wild must not eat the whole token budget by itself).
+MAX_STEP_TEXT = 6000
 
 
 class IncompleteReason(StrEnum):
@@ -152,6 +163,12 @@ class _StepRecord:
 
     def render(self, compact: bool = False) -> str:
         body = self.summary if compact and self.summary else self.text
+        if len(body) > MAX_STEP_TEXT:
+            body = (
+                body[:MAX_STEP_TEXT]
+                + f"\n…(بریده شد؛ {len(body) - MAX_STEP_TEXT} نویسهٔ بعدی حذف شد — "
+                "برای متن کامل، read_span را روی همین span تکرار کن)"
+            )
         return f"[گام {self.step}] {body}"
 
 
@@ -177,6 +194,15 @@ class _RunState:
     total_tokens: int = 0
     last_turn: PlannerTurn | None = None
     consecutive_empty: int = 0
+    #: Deterministic tools make repeated (tool, args) calls pointless; cache
+    #: the first envelope per key and replay it so the model cannot burn the
+    #: step budget re-reading the same span.
+    repeat_cache: dict[tuple[str, str], Any] = field(default_factory=dict)
+    #: How many successful calls touched each instrument (for the structure
+    #: hint) and which documents already had their outline requested/hinted.
+    doc_touch: dict[str, int] = field(default_factory=dict)
+    structure_keys: set[str] = field(default_factory=set)
+    nav_hinted: set[str] = field(default_factory=set)
 
 
 class ToolResearchLoop:
@@ -488,6 +514,56 @@ class ToolResearchLoop:
         thought: str | None = None,
     ) -> None:
         started = time.monotonic()
+        key = (tool, json.dumps(args, ensure_ascii=False, sort_keys=True))
+        cached = state.repeat_cache.get(key)
+        if cached is not None:
+            # Deterministic tool + identical args = identical result. Replay it
+            # and tell the model plainly that repeating buys nothing.
+            latency = int((time.monotonic() - started) * 1000)
+            envelope = cached
+            if envelope.status is ToolStatus.EMPTY:
+                state.consecutive_empty += 1
+            else:
+                state.consecutive_empty = 0
+            state.trace.append(
+                ToolCallTrace(
+                    step, tool, dict(args), True, envelope.status.value,
+                    "repeat — identical call replayed from cache", latency,
+                    envelope.returned_count,
+                )
+            )
+            state.steps.append(
+                _StepRecord(
+                    step,
+                    "repeat",
+                    f"فراخوانی تکراری {tool} با دقیقاً همین آرگومان‌ها — همان نتیجهٔ "
+                    f"پیشین برگشت (status {envelope.status.value}). تکرار بی‌فایده است: "
+                    "با evidence_idهای موجود answer بده، یا آرگومان/ابزار متفاوتی بزن.",
+                    summary=f"REPEAT {tool} — همان نتیجهٔ قبلی",
+                )
+            )
+            _emit(
+                progress,
+                {
+                    "type": "tool_call",
+                    "step": step,
+                    "tool": tool,
+                    "args": dict(args),
+                    "thought": thought,
+                    "ok": True,
+                    "status": envelope.status.value,
+                    "total_count": envelope.total_count,
+                    "returned_count": envelope.returned_count,
+                    "complete": envelope.complete,
+                    "latency_ms": latency,
+                    "evidence_count": 0,
+                    "cypher": envelope.meta.get("cypher"),
+                    "nodes": [],
+                    "edges": [],
+                    "repeat": True,
+                },
+            )
+            return
         try:
             result = self.tools.dispatch(state.store, tool, args)
         except ToolArgumentError as exc:
@@ -522,11 +598,13 @@ class ToolResearchLoop:
             return
         latency = int((time.monotonic() - started) * 1000)
         envelope = result.envelope
+        state.repeat_cache[key] = envelope
         nodes, edges = harvest_refs(tool, envelope, args)
         if envelope.status is ToolStatus.EMPTY:
             state.consecutive_empty += 1
         else:
             state.consecutive_empty = 0
+        nav_hint = self._maybe_nav_hint(tool, args, envelope, state)
         for evidence in result.evidence:
             if ledger.add(evidence):
                 episode.record(
@@ -550,7 +628,7 @@ class ToolResearchLoop:
             )
         )
         state.steps.append(
-            _StepRecord(
+             _StepRecord(
                 step,
                 "tool",
                 f"TOOL {tool} {json.dumps(args, ensure_ascii=False, sort_keys=True)}\n"
@@ -558,6 +636,15 @@ class ToolResearchLoop:
                 summary=self._tool_summary(tool, args, envelope),
             )
         )
+        if nav_hint:
+            state.steps.append(
+                _StepRecord(
+                    step,
+                    "nav_hint",
+                    nav_hint,
+                    summary="NAV-HINT: get_document_structure",
+                )
+            )
         _emit(
             progress,
             {
@@ -601,6 +688,64 @@ class ToolResearchLoop:
             id_blob += "…"
         suffix = f" ev={id_blob}" if id_blob else ""
         return f"TOOL {tool} {args_blob} → {envelope.status.value} ({coverage}){suffix}"
+
+    #: Tools whose successful hits mean "we are grinding inside one document".
+    _NAV_TOOLS = frozenset(
+        {"search_provisions", "find_in_document", "read_span", "list_document_contents"}
+    )
+
+    @staticmethod
+    def _fold(text: str) -> str:
+        return (text or "").casefold().replace("\u200c", "").strip()
+
+    @classmethod
+    def _maybe_nav_hint(
+        cls, tool: str, args: dict, envelope: Any, state: _RunState
+    ) -> str | None:
+        """One-time per document: push the PageIndex ladder when the model is
+        grinding inside a long document without ever opening its outline.
+
+        The rule exists in the prompt, but models ignore it under keyword
+        habits (76-case run: get_document_structure called twice); a targeted
+        transcript note is what actually changes behaviour — same mechanism as
+        the evidence nudge.
+        """
+        if envelope.status in (ToolStatus.EMPTY, ToolStatus.ERROR, ToolStatus.NOT_FOUND):
+            return None
+        if tool == "get_document_structure":
+            document = args.get("document")
+            if isinstance(document, str) and document.strip():
+                state.structure_keys.add(cls._fold(document))
+            return None
+        if tool not in cls._NAV_TOOLS or not envelope.items:
+            return None
+        touched: set[str] = set()
+        for item in envelope.items:
+            if not isinstance(item, dict):
+                continue
+            title = item.get("instrument_title")
+            if isinstance(title, str) and title.strip():
+                touched.add(title.strip())
+        hint: str | None = None
+        for title in touched:
+            key = cls._fold(title)
+            state.doc_touch[key] = state.doc_touch.get(key, 0) + 1
+            if (
+                state.doc_touch[key] >= 2
+                and key not in state.structure_keys
+                and title not in state.nav_hinted
+            ):
+                state.nav_hinted.add(title)
+                hint = (
+                    f"نکتهٔ ناوبری: روی سند «{title}» {state.doc_touch[key]} بار "
+                    "جست‌وجو/خواندن شده ولی فهرست بخش‌هایش دیده نشده. "
+                    f"get_document_structure(document=«{title}») نقشهٔ بخش‌ها را با "
+                    "بازهٔ صفحه می‌دهد؛ بخشِ محتمل را انتخاب کن، find_in_document با "
+                    "page_from/page_to همان بازه بزن، تکهٔ حاوی پاسخ را read_span کن و "
+                    "evidence_id ای را cite کن که متنش حاوی جملهٔ ادعاست. اگر پاسخ نبود، "
+                    "به فهرست برگرد و بخشِ بعدی را امتحان کن."
+                )
+        return hint
 
     @staticmethod
     def _evidence_nudge(ledger: EvidenceLedger) -> str:

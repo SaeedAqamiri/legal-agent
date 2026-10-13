@@ -19,6 +19,11 @@ from .envelope import Envelope, RefStore, ToolStatus, empty_envelope, make_envel
 
 EXCERPT_CHARS = 280
 
+#: Cap for full-text payloads handed to the planner (read_span /
+#: get_provision_version). Some corpus spans are entire documents (~100KB);
+#: uncapped text inflates one transcript step past the whole token budget.
+MAX_SPAN_TEXT = 4000
+
 #: Query tokens that mark the query as an article/paragraph reference
 #: («ماده ۳۶۵ قانون مدنی»). Only then does the exact-number boost apply.
 _ARTICLE_REFERENCE_TOKENS = frozenset(
@@ -396,7 +401,8 @@ class LegalResearchTools:
             "effective_from": _iso(version.effective_from),
             "effective_to": _iso(version.effective_to),
             "applies_at_time": version.applies_at(applicable_time),
-            "text": version.text,
+            "text": version.text[:MAX_SPAN_TEXT],
+            "truncated": len(version.text) > MAX_SPAN_TEXT,
             "page": span.page_number if span else None,
             # All pages this provision occupies (page-level spans), so the
             # planner can cite or read the exact page a passage lives on.
@@ -732,15 +738,22 @@ class LegalResearchTools:
 
         items: list[dict[str, Any]] = []
         evidence: list[Evidence] = []
+        referenced: list[dict[str, Any]] = []
         for score, span, version, provision, instrument in rows:
-            ev = self._evidence_for_span(
-                span,
+            # Follow resolved refs like every other evidence-producing tool so
+            # citing a grep hit can never trip unfollowed_explicit_reference.
+            ev, aux_evidence, aux_items = self._evidence_for_version(
                 version,
                 applicable_time,
                 method="agentic_grep",
                 reason="in-document passage match",
+                preferred_span=span,
             )
+            if ev is None:
+                continue
             evidence.append(ev)
+            evidence.extend(aux_evidence)
+            referenced.extend(aux_items)
             items.append(
                 self._grep_item(span, version, provision, instrument, ev, score, query_tokens)
             )
@@ -751,6 +764,7 @@ class LegalResearchTools:
             "query": query,
             "page": page,
             "deterministic": True,
+            "referenced": referenced,
             **(
                 {
                     "partial_match": True,
@@ -805,13 +819,25 @@ class LegalResearchTools:
         version = self.canonical.get_provision_version(span.provision_version_id)
         provision = self.canonical.get_provision(version.provision_id)
         instrument = self.canonical.get_instrument(provision.instrument_id)
-        evidence = self._evidence_for_span(
-            span,
+        # Follow resolved explicit references so a cited span-read can never
+        # fail the verifier's unfollowed_explicit_reference check (same
+        # contract as search_provisions / get_provision_version).
+        evidence, aux_evidence, aux_items = self._evidence_for_version(
             version,
             applicable_time,
             method="agentic_read",
             reason="span read",
+            preferred_span=span,
         )
+        if evidence is None:  # defensive: the span's version has no spans
+            evidence = self._evidence_for_span(
+                span,
+                version,
+                applicable_time,
+                method="agentic_read",
+                reason="span read",
+            )
+            aux_evidence, aux_items = (), ()
         item = {
             "evidence_id": evidence.evidence_id,
             "source_span_id": span.source_span_id,
@@ -826,10 +852,24 @@ class LegalResearchTools:
             "page": span.page_number,
             "char_start": span.char_start,
             "char_end": span.char_end,
-            "text": span.raw_text,
+            # Some corpus spans are ENTIRE documents (~100KB, cats single-
+            # provision ingest). The full text lives in the ledger Evidence;
+            # the planner payload only needs a bounded excerpt or one tool
+            # step inflates the transcript by 100k chars and kills the
+            # token budget.
+            "text": span.raw_text[:MAX_SPAN_TEXT],
+            "truncated": len(span.raw_text) > MAX_SPAN_TEXT,
+            "total_chars": len(span.raw_text),
+            "cite_hint": (
+                f"اگر این تکه مبنای ادعاست، همین evidence_id را cite کن (صفحهٔ {span.page_number})"
+            ),
         }
-        envelope = make_envelope(store, (item,), total_count=1)
-        return ToolResult(envelope, (evidence,))
+        envelope = make_envelope(
+            store, (item,), total_count=1, meta={"referenced": aux_items}
+        )
+        return ToolResult(
+            envelope, tuple(e for e in (evidence, *aux_evidence) if e is not None)
+        )
 
     def _list_document_contents(self, store: RefStore, args: dict[str, Any]) -> ToolResult:
         document = require_str(args, "document")

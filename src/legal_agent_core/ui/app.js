@@ -321,15 +321,61 @@ function renderGraphEvents(events) {
   });
 }
 
+function toAsciiDigits(value) {
+  return String(value)
+    .replace(/[۰-۹]/g, (digit) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit)))
+    .replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit)));
+}
+
+function cutAtSentenceBoundary(text, max) {
+  if (text.length <= max) return text;
+  const slice = text.slice(0, max);
+  const cut = Math.max(
+    slice.lastIndexOf("۔"), slice.lastIndexOf("."), slice.lastIndexOf("؛"),
+    slice.lastIndexOf("؟"), slice.lastIndexOf("!"),
+  );
+  const trimmed = cut > max * 0.5 ? slice.slice(0, cut + 1) : slice.replace(/\s+\S*$/, "");
+  return `${trimmed} …`;
+}
+
+function citationExcerpt(citation) {
+  const raw = String(citation.quoted_text || "");
+  if (raw.length <= 340) return { excerpt: raw, clamped: false };
+  const label = toAsciiDigits(citation.provision_label || "").trim();
+  let start = 0;
+  if (label) {
+    const position = toAsciiDigits(raw).indexOf(label);
+    if (position > 0) start = position;
+  }
+  const excerpt = cutAtSentenceBoundary(raw.slice(start, start + 460), 420);
+  return { excerpt: start > 0 ? `… ${excerpt}` : excerpt, clamped: true };
+}
+
 function citationCard(citation) {
   const card = document.createElement("article");
   card.className = "citation-card";
   const top = document.createElement("div"); top.className = "citation-top";
   top.append(text("span", citation.marker, "citation-marker"), text("span", `صفحه ${faNumber.format(citation.page)}`, "citation-page"));
   card.append(top, text("h4", `${citation.instrument_title} — ${citation.provision_label}`), text("small", `نسخه سند: ${citation.document_version_id}`));
-  card.append(text("blockquote", citation.quoted_text));
+
+  const { excerpt, clamped } = citationExcerpt(citation);
+  const quote = text("blockquote", excerpt, "citation-quote" + (clamped ? " is-clamped" : ""));
+  card.append(quote);
+  if (clamped) {
+    const toggle = text("button", "متن کامل نقل‌قول", "citation-toggle");
+    toggle.type = "button";
+    let expanded = false;
+    toggle.addEventListener("click", () => {
+      expanded = !expanded;
+      quote.textContent = expanded ? citation.quoted_text : excerpt;
+      quote.classList.toggle("is-clamped", !expanded);
+      toggle.textContent = expanded ? "نمایش کمتر" : "متن کامل نقل‌قول";
+    });
+    card.append(toggle);
+  }
+
   card.append(text("div", `${citation.provision_version_id} / ${citation.source_span_id}`, "citation-identity"));
-  const open = text("button", "مشاهده در سندخوان ←", "citation-open");
+  const open = text("button", "مشاهده در سندخوان ←", "citation-open is-primary");
   open.type = "button";
   open.addEventListener("click", () => openLibraryDocument(citation.document_version_id, citation.source_span_id));
   card.append(open);
@@ -517,17 +563,42 @@ function resetLiveGraph() {
 
 const DIAGRAM_NODE = { w: 196, h: 62, gapX: 26, gapY: 64, margin: 34 };
 const DIAGRAM_VIEW = { w: 1000, h: 560 };
-const liveDiagram = { steps: [], active: -1, positions: [], edgePaths: [], token: null, animating: null };
+const liveDiagram = { steps: [], active: -1, positions: [], edgePaths: [], token: null, animating: null, phaseIndex: {}, eventCount: 0 };
 
-function liveStepKind(event) {
+const DIAGRAM_PHASES = {
+  start: { title: "شروع پژوهش" },
+  search: { title: "جست‌وجوی منابع" },
+  read: { title: "خواندن منابع" },
+  temporal: { title: "کنترل زمانی و نسخه" },
+  link: { title: "پیوندها و همسایه‌ها" },
+  verify: { title: "راستی‌آزمایی" },
+  answer: { title: "پاسخ نهایی" },
+};
+const PHASE_COLORS = {
+  start: "#8fa8bd", search: "#2f8f86", read: "#4f8fd0", temporal: "#9a6ac9",
+  link: "#d98a2b", verify: "#c9a24a", answer: "#57b978",
+};
+
+const TOOL_PHASES = {
+  search_provisions: "search", semantic_search: "search", expand_search_terms: "search",
+  search_laws: "search", search_judgments: "search", find_nodes: "search",
+  find_in_document: "search", list_documents: "search", list_document_contents: "search",
+  get_document_structure: "search", get_statute_family: "search", graph_stats: "search",
+  get_provision_version: "read", get_provision_text: "read", read_span: "read", list_provisions: "read",
+  temporal_check: "temporal", get_version_history: "temporal",
+  get_references: "link", get_related: "link", node_neighbors: "link", find_paths: "link", run_cypher: "link",
+  aggregate_count: "verify",
+};
+
+function eventPhaseId(event) {
   if (event.type === "started") return "start";
   if (event.type === "answer") return "answer";
   if (event.type === "verification_rejected" || event.type === "verification_accepted") return "verify";
   if (event.type === "tool_error" || event.type === "contract_error" || event.type === "abstained") return "error";
-  return "tool";
+  return TOOL_PHASES[event.tool] || "search";
 }
 
-function liveStepTitle(event) {
+function eventTitle(event) {
   if (event.type === "started") return "شروع پژوهش";
   if (event.type === "answer") return "پاسخ نهایی";
   if (event.type === "tool_call" || event.type === "tool_error") return toolLabels[event.tool] || event.tool || "ابزار";
@@ -538,7 +609,7 @@ function liveStepTitle(event) {
   return eventLabels[event.type] || event.type;
 }
 
-function liveStepBadge(event) {
+function eventBadge(event) {
   if (event.type === "tool_call") {
     const coverage = event.total_count == null
       ? `${faNumber.format(event.returned_count || 0)} نتیجه`
@@ -552,6 +623,36 @@ function liveStepBadge(event) {
   if (event.type === "answer") return "نتیجه";
   if (event.type === "started") return "آغاز";
   return "";
+}
+
+function eventSubtitle(event) {
+  if (event.type === "verification_rejected") return (event.issues || []).map((issue) => issue.code).join("، ");
+  if (event.type === "verification_accepted") return "همهٔ ادعاها به شواهد مستند شد";
+  if (event.type === "abstained") return event.reason || "";
+  if (event.type === "contract_error") return event.message || "";
+  if (event.type === "tool_error") return event.error || "";
+  if (event.type === "started") return "";
+  const args = event.args || {};
+  const query = args.query || args.topic || args.q || args.term;
+  if (query) return String(query);
+  const nodes = Array.isArray(event.nodes) ? event.nodes : [];
+  if (nodes.length && nodes[0] && nodes[0].title) return String(nodes[0].title);
+  const target = args.provision_id || args.instrument_id || args.node_id || args.law || args.judgment_id;
+  if (target) return String(target);
+  return describeEvent(event);
+}
+
+function renderPhaseLegend() {
+  const legend = byId("live-diagram-legend");
+  if (!legend || legend.children.length) return;
+  clear(legend);
+  for (const key of ["search", "read", "temporal", "link", "verify", "answer"]) {
+    const item = document.createElement("span"); item.className = "legend-item";
+    const dot = document.createElement("i"); dot.className = "legend-dot";
+    dot.style.backgroundColor = PHASE_COLORS[key];
+    item.append(dot, text("span", DIAGRAM_PHASES[key].title));
+    legend.append(item);
+  }
 }
 
 function diagramColumns(count, containerAspect) {
@@ -646,10 +747,11 @@ function renderLiveDiagram() {
     rect.setAttribute("x", x - w / 2); rect.setAttribute("y", y - h / 2);
     rect.setAttribute("width", w); rect.setAttribute("height", h);
     rect.setAttribute("rx", 12); rect.setAttribute("ry", 12);
-    const sub = step.badge || step.sub || "";
+    const countPrefix = step.count > 1 ? `×${faNumber.format(step.count)} · ` : "";
+    const sub = `${countPrefix}${step.sub || ""}`.trim();
     group.append(halo, rect,
       svgText("dgm-node-title", x, y - 5, (step.title || "").slice(0, 26)),
-      svgText("dgm-node-sub", x, y + 15, sub.slice(0, 30)));
+      svgText("dgm-node-sub", x, y + 15, sub.slice(0, 34)));
     group.addEventListener("click", () => showStepDetail(step.event, step));
     nodeLayer.append(group);
   });
@@ -662,17 +764,19 @@ function renderLiveDiagram() {
   liveDiagram.token = token;
 }
 
-function animateToNode(index) {
+function animateToken(fromIndex, toIndex) {
   const token = liveDiagram.token;
   const positions = liveDiagram.positions;
   if (!token || !positions.length) return;
   if (liveDiagram.animating) { cancelAnimationFrame(liveDiagram.animating); liveDiagram.animating = null; }
-  const to = positions[index];
-  const from = positions[index - 1] || to;
-  const edge = liveDiagram.edgePaths[index - 1];
+  const to = positions[toIndex];
+  if (!to) return;
+  const forward = toIndex === fromIndex + 1;
+  const edge = forward ? liveDiagram.edgePaths[fromIndex] : null;
+  const from = positions[fromIndex] || positions[Math.max(0, fromIndex)] || to;
   if (edge) edge.classList.add("dgm-edge-flow");
   const total = edge ? edge.getTotalLength() : 0;
-  const duration = 480;
+  const duration = 420;
   const start = performance.now();
   const tick = (now) => {
     const t = Math.min(1, (now - start) / duration);
@@ -716,29 +820,49 @@ function showStepDetail(event, step) {
   if (!box) return;
   clear(box);
   const head = document.createElement("div"); head.className = "detail-head";
-  const badge = text("span", (step && step.badge) || liveStepBadge(event) || event.type, "detail-badge");
-  const kind = step ? step.kind : liveStepKind(event);
+  const kind = step ? step.kind : eventPhaseId(event);
+  const badge = text("span", eventBadge(event) || event.type, "detail-badge");
   if (kind === "error") badge.classList.add("is-error");
   else if (kind === "answer" || kind === "verify") badge.classList.add("is-ok");
-  head.append(text("strong", liveStepTitle(event)), badge);
+  head.append(text("strong", (step && step.title) || eventTitle(event)), badge);
   box.append(head, buildStepBody(event));
 }
 
 function resetLiveDiagram() {
   if (liveDiagram.animating) { cancelAnimationFrame(liveDiagram.animating); liveDiagram.animating = null; }
-  liveDiagram.steps = []; liveDiagram.active = -1; liveDiagram.positions = []; liveDiagram.edgePaths = []; liveDiagram.token = null;
+  liveDiagram.steps = []; liveDiagram.active = -1; liveDiagram.positions = []; liveDiagram.edgePaths = [];
+  liveDiagram.token = null; liveDiagram.phaseIndex = {}; liveDiagram.eventCount = 0;
   const svg = byId("live-diagram"); if (svg) clear(svg);
 }
 
 function appendLiveEvent(event, animate = true) {
-  const step = { kind: liveStepKind(event), title: liveStepTitle(event), badge: liveStepBadge(event), event };
-  liveDiagram.steps.push(step);
-  liveDiagram.active = liveDiagram.steps.length - 1;
+  const phaseId = eventPhaseId(event);
+  let index = liveDiagram.phaseIndex[phaseId];
+  if (index === undefined) {
+    liveDiagram.steps.push({
+      phase: phaseId,
+      kind: phaseId,
+      title: DIAGRAM_PHASES[phaseId] ? DIAGRAM_PHASES[phaseId].title : eventTitle(event),
+      count: 0,
+      sub: "",
+      event,
+    });
+    index = liveDiagram.steps.length - 1;
+    liveDiagram.phaseIndex[phaseId] = index;
+  }
+  const step = liveDiagram.steps[index];
+  const prevActive = liveDiagram.active;
+  step.count += 1;
+  step.event = event;
+  if (!DIAGRAM_PHASES[phaseId]) step.title = eventTitle(event);
+  step.sub = eventSubtitle(event);
+  liveDiagram.active = index;
+  liveDiagram.eventCount += 1;
   renderLiveDiagram();
   if (animate) {
-    animateToNode(liveDiagram.active);
+    animateToken(prevActive, index);
   } else {
-    const pos = liveDiagram.positions[liveDiagram.active];
+    const pos = liveDiagram.positions[index];
     if (liveDiagram.token && pos) {
       liveDiagram.token.setAttribute("cx", pos.x);
       liveDiagram.token.setAttribute("cy", pos.y);
@@ -746,7 +870,7 @@ function appendLiveEvent(event, animate = true) {
   }
   showStepDetail(event, step);
   const count = byId("stage-step-count");
-  if (count) count.textContent = `${faNumber.format(liveDiagram.steps.length)} گام`;
+  if (count) count.textContent = `${faNumber.format(liveDiagram.eventCount)} گام`;
   if (event.type === "tool_call") liveGraphAdd(event);
 }
 
@@ -764,6 +888,7 @@ function setStageStatus(kind, label) {
 
 function enterLiveStage(question) {
   clearResearchView();
+  renderPhaseLegend();
   byId("research-panel").classList.add("is-live");
   byId("live-stage").classList.remove("is-hidden");
   byId("stage-question-text").textContent = question || "—";
@@ -929,9 +1054,14 @@ function renderDocument(data) {
   if (sourceUrl) sourceLink.href = sourceUrl;
   const outline = byId("document-outline"); const canvas = byId("document-canvas");
   clear(outline); clear(canvas);
+  const selectedSpanId = data.selected_source_span_id || null;
+  show(byId("viewer-arrival"), Boolean(selectedSpanId));
   data.provisions.forEach((provision, index) => {
     const sectionId = `provision-section-${index}`;
-    const outlineButton = text("button", provision.label); outlineButton.type = "button";
+    const holdsTarget = Boolean(selectedSpanId)
+      && provision.spans.some((span) => span.source_span_id === selectedSpanId);
+    const outlineButton = text("button", provision.label, holdsTarget ? "is-target" : "");
+    outlineButton.type = "button";
     outlineButton.addEventListener("click", () => byId(sectionId).scrollIntoView({behavior:"smooth", block:"start"}));
     outline.append(outlineButton);
     const sheet = documentElement("article", "provision-sheet"); sheet.id = sectionId;
@@ -948,7 +1078,9 @@ function renderDocument(data) {
   const highlighted = canvas.querySelector(".source-span.is-highlighted");
   if (highlighted) {
     renderSpanInspector(highlighted._spanData, highlighted._provisionData);
+    highlighted.classList.add("is-arriving");
     window.setTimeout(() => highlighted.scrollIntoView({behavior:"smooth", block:"center"}), 60);
+    window.setTimeout(() => highlighted.classList.remove("is-arriving"), 2400);
   } else {
     resetSpanInspector();
   }

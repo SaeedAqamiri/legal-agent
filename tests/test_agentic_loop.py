@@ -430,20 +430,27 @@ class TranscriptCompactionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.repository = build_canonical()
 
-    def _search(self):
+    def _search(self, query: str = "مهلت تجدیدنظر"):
         return PlannerDecision(
             "tool",
             tool="search_provisions",
             args={
-                "query": "مهلت تجدیدنظر",
+                "query": query,
                 "applicable_time": APPLICABLE.isoformat(),
             },
         )
 
     def test_old_steps_compact_recent_stay_full(self) -> None:
+        # Identical (tool, args) calls are replayed from the repeat cache, so
+        # the burn run uses distinct queries; the 5th fills the step budget.
         planner = ScriptedPlanner(
-            [self._search(), self._search(), self._search(), self._search()],
-            repeat_last=True,
+            [
+                self._search("مهلت تجدیدنظر"),
+                self._search("مهلت اعتراض"),
+                self._search("مهلت واخواهی"),
+                self._search("مهلت فرجام"),
+                self._search("مهلت مطالبه"),
+            ],
         )
         outcome = _run(_loop(self.repository, planner, max_steps=5))
         self.assertFalse(outcome.completed)  # never answered; budget burn run

@@ -6,9 +6,9 @@
     <meta name="color-scheme" content="light">
     <meta name="theme-color" content="#173f38">
     <title>رهنما — دستیار پژوهش حقوقی</title>
-    <link rel="stylesheet" href="/ui/styles.css?v=3">
+    <link rel="stylesheet" href="/ui/styles.css?v=5">
     <script src="/ui/vendor/vis-network.min.js" defer></script>
-    <script src="/ui/app.js?v=3" defer></script>
+    <script src="/ui/app.js?v=5" defer></script>
   </head>
   <body>
     <div class="app-shell">
@@ -153,6 +153,7 @@
               <div class="stage-grid">
                 <div class="stage-diagram">
                   <div class="section-label">نمودار گام‌به‌گام پژوهش</div>
+                  <div class="diagram-legend" id="live-diagram-legend"></div>
                   <div class="diagram-wrap">
                     <svg id="live-diagram" viewBox="0 0 1000 560" preserveAspectRatio="xMidYMid meet" role="img" aria-label="نمودار گام‌به‌گام پژوهش زنده"></svg>
                   </div>
@@ -224,6 +225,7 @@
                 <div><span class="overline" id="viewer-type">سند حقوقی</span><h2 id="viewer-title"></h2><p id="viewer-description"></p></div>
                 <div class="document-seal" aria-hidden="true">قانون</div>
               </header>
+              <div class="viewer-arrival is-hidden" id="viewer-arrival"><span aria-hidden="true">◆</span> به بخشِ مرتبط با پاسخ اسکرول شد و هایلایت شده است؛ در «فهرست مواد» هم نشان‌دار است.</div>
               <div class="viewer-layout">
                 <aside class="document-outline"><div class="section-label">فهرست مواد</div><nav id="document-outline" aria-label="فهرست مواد سند"></nav></aside>
                 <main class="document-canvas" id="document-canvas"></main>

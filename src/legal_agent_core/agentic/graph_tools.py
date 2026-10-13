@@ -937,16 +937,24 @@ class GraphTools:
         limit = self._optional_limit(args, self.items_per_page)
         identity = "(n.id = $nid OR n.name = $nid)"
         rel_filter = " AND ($rels IS NULL OR type(r) IN $rels)"
+        # Provision neighbours carry only their label («تبصره ۱-»), which is
+        # unidentifiable on its own — attach the owning instrument so the
+        # planner learns WHICH law the neighbour belongs to.
         projection = (
             "RETURN DISTINCT type(r) AS rel, labels(m)[0] AS label, "
-            "coalesce(m.id, m.name) AS id, coalesce(m.title, m.label, m.name) AS title "
+            "coalesce(m.id, m.name) AS id, coalesce(m.title, m.label, m.name) AS title, "
+            "coalesce(mi.id, '') AS owner_id, coalesce(mi.title, '') AS owner_title "
             "ORDER BY rel, title LIMIT $lim"
         )
         out_query = (
-            f"MATCH (n)-[r]->(m) WHERE {identity}{rel_filter} {projection}"
+            f"MATCH (n)-[r]->(m) WHERE {identity}{rel_filter} "
+            "OPTIONAL MATCH (mi:LegalInstrument)-[:CONTAINS]->(m) "
+            f"{projection}"
         )
         in_query = (
-            f"MATCH (n)<-[r]-(m) WHERE {identity}{rel_filter} {projection}"
+            f"MATCH (n)<-[r]-(m) WHERE {identity}{rel_filter} "
+            "OPTIONAL MATCH (mi:LegalInstrument)-[:CONTAINS]->(m) "
+            f"{projection}"
         )
         plans = (("out", out_query), ("in", in_query))
         params = {"nid": node_id, "rels": list(rel_types) if rel_types else None, "lim": limit}
@@ -959,15 +967,22 @@ class GraphTools:
                 errors.append(f"{direction}: {exc}")
                 continue
             for row in rows:
-                items.append(
-                    {
-                        "id": str(row[2]),
-                        "label": (row[1] or "").lower() or "node",
-                        "title": row[3],
-                        "rel": row[0],
-                        "direction": direction,
-                    }
-                )
+                title = row[3]
+                owner_id = str(row[4]) if len(row) > 4 and row[4] else None
+                owner_title = row[5] if len(row) > 5 and row[5] else None
+                if owner_title and (row[1] or "").lower() == "provision":
+                    title = f"{owner_title} — {title}"
+                item = {
+                    "id": str(row[2]),
+                    "label": (row[1] or "").lower() or "node",
+                    "title": title,
+                    "rel": row[0],
+                    "direction": direction,
+                }
+                if owner_id and owner_title:
+                    item["owner_id"] = owner_id
+                    item["owner_title"] = owner_title
+                items.append(item)
         if errors and not items:
             return empty_envelope(store, ToolStatus.ERROR, tuple(errors))
         if not items:

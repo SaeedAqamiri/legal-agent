@@ -114,9 +114,28 @@ main { padding: 45px 52px 70px; }
 .citation-card h4 { margin: 12px 0 4px; font-size: 13px; }
 .citation-card small { color: var(--muted); font-size: 9px; }
 .citation-card blockquote { margin: 14px 0 0; padding: 11px 13px; color: #4e5d58; border-right: 2px solid #cfb47f; background: #f4f1e9; font-size: 10px; line-height: 1.9; }
+.citation-quote.is-clamped { position: relative; max-height: 118px; overflow: hidden; }
+.citation-quote.is-clamped::after { content: ""; position: absolute; inset-inline: 0; bottom: 0; height: 54px;
+  background: linear-gradient(transparent, rgba(244,241,233,.96)); }
+.citation-toggle { margin-top: 7px; padding: 5px 10px; color: var(--green); border: 1px solid #b9cbc4;
+  border-radius: 4px; background: transparent; font-size: 9px; font-weight: 700; }
+.citation-toggle:hover { background: #e9f0ec; }
 .citation-identity { margin-top: 12px; color: #89928f; font-family: Consolas, monospace; font-size: 8px; direction: ltr; text-align: left; overflow-wrap: anywhere; }
 .citation-open { margin-top: 13px; padding: 7px 10px; color: var(--green); border: 1px solid #b9cbc4; border-radius: 4px; background: transparent; font-size: 9px; font-weight: 700; }
 .citation-open:hover { background: #e9f0ec; }
+.citation-open.is-primary { color: white; border-color: var(--green); background: var(--green); }
+.citation-open.is-primary:hover { background: var(--green-2); }
+
+.viewer-arrival { margin: 14px 24px 0; padding: 11px 14px; color: #6a5320; border: 1px solid #e5cdb0;
+  border-right: 3px solid var(--gold); border-radius: 8px; background: #fbf2e8; font-size: 11px; line-height: 1.9; }
+.viewer-arrival span { color: var(--gold); margin-left: 6px; }
+.document-outline button.is-target { color: var(--green); background: #dfe8e3; font-weight: 700; }
+.document-outline button.is-target::before { content: "◆"; margin-left: 6px; color: var(--gold); font-size: 8px; }
+.source-span.is-arriving { animation: span-arrive 2s ease-out; }
+@keyframes span-arrive {
+  0%, 45% { box-shadow: 0 0 0 5px rgba(185,135,50,.4); }
+  100% { box-shadow: 0 0 0 0 rgba(185,135,50,0); }
+}
 .issues-card { margin-top: 20px; padding: 18px; border: 1px solid #e5cdb0; background: #fbf2e8; }
 .issues-card h3 { margin: 0 0 10px; color: #84562e; font-size: 13px; }
 .issue { margin-top: 7px; color: #795d44; font-size: 10px; }
@@ -400,11 +419,13 @@ dialog input:focus { border-color: #6e988b; box-shadow: 0 0 0 3px rgba(36,92,80,
 .dgm-node rect { fill: #12241f; stroke: #33605a; stroke-width: 1.6; }
 .dgm-node text { fill: #cfe3da; font-size: 13px; font-weight: 700; }
 .dgm-node .dgm-node-sub { fill: #7fa89a; font-size: 10px; font-weight: 400; }
-.dgm-node .dgm-node-badge { fill: #9fc4b7; font-size: 10px; font-weight: 400; }
-.dgm-node.is-start rect { stroke: #4f8fd0; }
-.dgm-node.is-tool rect { stroke: #2f8f86; }
-.dgm-node.is-error rect { fill: #2a1412; stroke: #c25a4f; }
+.dgm-node.is-start rect { stroke: #8fa8bd; }
+.dgm-node.is-search rect { stroke: #2f8f86; }
+.dgm-node.is-read rect { stroke: #4f8fd0; }
+.dgm-node.is-temporal rect { stroke: #9a6ac9; }
+.dgm-node.is-link rect { stroke: #d98a2b; }
 .dgm-node.is-verify rect { stroke: #c9a24a; }
+.dgm-node.is-error rect { fill: #2a1412; stroke: #c25a4f; }
 .dgm-node.is-answer rect { fill: #14301f; stroke: #57b978; }
 .dgm-node.is-done rect { fill: #16302a; }
 .dgm-node.is-active rect { stroke: #4cc2ff; stroke-width: 2.6; }
@@ -414,6 +435,10 @@ dialog input:focus { border-color: #6e988b; box-shadow: 0 0 0 3px rgba(36,92,80,
 .dgm-node.is-active .dgm-halo { animation: dgm-pulse 1.5s ease-out infinite; }
 @keyframes dgm-pulse { 0% { opacity: .85; r: 22; } 100% { opacity: 0; r: 40; } }
 .dgm-token { fill: #7ff0c0; filter: drop-shadow(0 0 6px rgba(127,240,192,.9)); }
+
+.diagram-legend { display: flex; flex-wrap: wrap; gap: 10px; }
+.diagram-legend .legend-item { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; color: #5a6660; }
+.diagram-legend .legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 
 .stage-detail { flex: 0 0 auto; max-height: 34%; overflow: auto; padding: 14px 16px; border-radius: 12px;
   border: 1px solid #e2e6e2; background: #fbfaf6; }

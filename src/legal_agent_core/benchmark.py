@@ -13,14 +13,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 from .answering import AnswerCompositionError, PublishedAnswer
+from .canonical import DocumentStatus, InstrumentType, ProvisionType
 from .errors import DomainError
 from .ingestion.markdown_parser import MarkdownDocumentParser
+from .ingestion.models import ParsedDocument
+from .ingestion.normalization import normalize_legal_text
 from .ingestion.pipeline import CanonicalIngestionPipeline
 from .jalali import parse_jalali_date
 from .navigation import ResearchOutcome
@@ -383,6 +387,57 @@ class ExtractiveAnswerComposer:
         return DraftAnswer(answer_id, "\n".join(lines), tuple(claims))
 
 
+def _structureless_fallback(path: Path, raw_text: str) -> ParsedDocument:
+    """Single-provision document for structureless sources (court rulings).
+
+    Mirrors scripts/ingest_cats_data.build_ruling_document: rulings have no
+    ماده skeleton, so the whole text becomes one provision — silently skipping
+    them made the gold document unretrievable for the agent.
+    """
+    from datetime import UTC, datetime
+
+    from .ingestion.models import (
+        DocumentVersionInput,
+        InstrumentInput,
+        ProvisionInput,
+        SourceInput,
+    )
+
+    title_match = re.search(r"^#\s+(.+)$", raw_text, re.MULTILINE)
+    title = title_match.group(1).strip() if title_match else path.stem
+    checksum = f"sha256:{hashlib.sha256(raw_text.encode('utf-8')).hexdigest()}"
+    return ParsedDocument(
+        source=SourceInput(
+            filename=path.name,
+            media_type="text/markdown",
+            checksum=checksum,
+            file_size=len(raw_text.encode("utf-8")),
+            ingested_at=datetime.now(UTC),
+            ingested_by="benchmark_seed",
+            source_uri=f"file://{path}",
+        ),
+        instrument=InstrumentInput(
+            title=title,
+            canonical_title=normalize_legal_text(title),
+            instrument_type=InstrumentType.JUDGMENT,
+            jurisdiction="IR",
+            issuer=None,
+            authority_level=None,
+            external_identifier=path.stem,
+        ),
+        version=DocumentVersionInput(status=DocumentStatus.EFFECTIVE),
+        provisions=(
+            ProvisionInput(
+                provision_type=ProvisionType.PARAGRAPH,
+                label="متن",
+                text=raw_text.strip(),
+                page_number=1,
+                title=title,
+            ),
+        ),
+    )
+
+
 def seed_corpus(
     repository: CanonicalRepository,
     corpus_dir: Path,
@@ -391,8 +446,9 @@ def seed_corpus(
     """Ingest ``D*.md`` files; return doc_code -> :class:`DocumentIndex` map.
 
     Document effective dates come from the manifest (Jalali) so temporal
-    gating behaves like production. Files that fail the structural parser are
-    reported as BenchmarkError instead of being silently dropped.
+    gating behaves like production. Files that fail the structural parser
+    (court rulings have no ماده skeleton) fall back to a single-provision
+    document instead of being silently dropped.
     """
     from dataclasses import replace as dataclass_replace
 
@@ -402,12 +458,11 @@ def seed_corpus(
     document_map: dict[str, DocumentIndex] = {}
     for path in sorted(corpus_dir.glob("D*.md")):
         doc_code = path.stem
+        raw_text = path.read_text(encoding="utf-8")
         try:
-            parsed = parser.from_text(path.read_text(encoding="utf-8"), path.name)
+            parsed = parser.from_text(raw_text, path.name)
         except DomainError:
-            # Structureless prose (e.g. court rulings) yields no provisions;
-            # skip it instead of failing the whole benchmark seeding.
-            continue
+            parsed = _structureless_fallback(path, raw_text)
         raw_date = (manifest or {}).get(doc_code, {}).get("date")
         effective_from = None
         if isinstance(raw_date, str) and raw_date.strip():

@@ -54,19 +54,62 @@ def main() -> int:
     pipeline = CanonicalIngestionPipeline(repository)
     totals = {"documents": 0, "provisions": 0, "spans": 0, "skipped": 0}
 
+
+    from dataclasses import replace as _replace
+
+    from legal_agent_core.benchmark import _structureless_fallback
+    from legal_agent_core.canonical import InstrumentType
+    from legal_agent_core.jalali import parse_jalali_date
+
+    def _fallback_type(category: str) -> InstrumentType:
+        if "رای" in category or "رأی" in category:
+            return InstrumentType.JUDGMENT
+        if "نظریه" in category:
+            return InstrumentType.ADVISORY_OPINION
+        return InstrumentType.OTHER
+
     for doc_id, meta in sorted(manifest["documents"].items()):
         if not meta.get("file"):
             print(f"[skip] {doc_id}: no file ({meta.get('quality', 'metadata-only')})")
             totals["skipped"] += 1
             continue
         path = corpus / "documents_md" / meta["file"]
+        if not path.is_file():
+            print(f"[skip] {doc_id}: file missing on disk ({meta['file']})")
+            totals["skipped"] += 1
+            continue
         content = path.read_text(encoding="utf-8")
         try:
             parsed = parser.from_text(content, meta["file"])
-        except DomainError as exc:
-            print(f"[skip] {doc_id}: {exc}")
-            totals["skipped"] += 1
-            continue
+        except DomainError:
+            # Court rulings and other prose have no ماده skeleton: fall back to
+            # a single-provision document instead of silently dropping them.
+            parsed = _structureless_fallback(path, content)
+            parsed = _replace(
+                parsed,
+                instrument=_replace(
+                    parsed.instrument,
+                    title=meta.get("title") or parsed.instrument.title,
+                    instrument_type=_fallback_type(meta.get("category", "")),
+                ),
+            )
+
+        raw_date = meta.get("date")
+        if isinstance(raw_date, str) and raw_date.strip():
+            try:
+                issued = parse_jalali_date(raw_date.strip())
+            except DomainError:
+                issued = None
+            if issued is not None:
+                parsed = _replace(
+                    parsed,
+                    version=_replace(
+                        parsed.version,
+                        effective_from=issued,
+                        enacted_at=issued,
+                        publication_date=issued,
+                    ),
+                )
 
         source_document_id = parsed.source.source_document_id or stable_id(
             "src", parsed.source.checksum
