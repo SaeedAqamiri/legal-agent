@@ -120,6 +120,10 @@ class CanonicalEdgeType(StrEnum):
     ANNULS = "annuls"
     CONFLICTS_WITH = "conflicts_with"
     SUBORDINATE_TO = "subordinate_to"
+    # instrument-level relation curated by the human editor of the source site
+    # («مستندات مرتبط» block): law<->law, no provision witness — unlike
+    # explicitly_references this needs no source span.
+    RELATED_TO = "related_to"
 
 
 @dataclass(frozen=True, slots=True)

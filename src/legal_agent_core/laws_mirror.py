@@ -30,6 +30,11 @@ __all__ = ["LAWS_GRAPH_ID", "sync_laws_mirror"]
 _LABEL_FOR_NODE_TYPE = {
     "legal_instrument": "LegalInstrument",
     "provision": "Provision",
+    # judgment/opinion -> instrument CITES edges written by
+    # scripts/ingest_source_related.py (mirror-side _sync_judgments wires its
+    # own, extracted-from-text CITES edges separately)
+    "judgment": "Judgment",
+    "advisory_opinion": "AdvisoryOpinion",
 }
 
 
@@ -204,7 +209,7 @@ def sync_laws_mirror(connection, falkor_graph, batch_size: int = 2000, log=_log)
         provisions = cur.fetchall()
         cur.execute(
             """SELECT source_node_type, source_node_id, target_node_type,
-                      target_node_id, edge_type, confidence, source_id
+                      target_node_id, edge_type, confidence, source_id, created_by
                  FROM canonical.graph_edges"""
         )
         edges = cur.fetchall()
@@ -283,7 +288,13 @@ def sync_laws_mirror(connection, falkor_graph, batch_size: int = 2000, log=_log)
 
     by_signature: dict[tuple[str, str, str], list] = defaultdict(list)
     unmapped = 0
-    for source_type, source_id, target_type, target_id, edge_type, confidence, provenance in edges:
+    invalidated = 0
+    for source_type, source_id, target_type, target_id, edge_type, confidence, provenance, created_by in edges:
+        # repair stage marks wrong machine-made relations this way; the row
+        # stays in canonical (append-only) but must not reach the graph
+        if created_by == "refs-invalidated":
+            invalidated += 1
+            continue
         source_label = _LABEL_FOR_NODE_TYPE.get(source_type)
         target_label = _LABEL_FOR_NODE_TYPE.get(target_type)
         if not source_label or not target_label:
@@ -299,6 +310,8 @@ def sync_laws_mirror(connection, falkor_graph, batch_size: int = 2000, log=_log)
         )
     if unmapped:
         log(f"skipped {unmapped} edges with unknown node types")
+    if invalidated:
+        log(f"skipped {invalidated} invalidated edges (refs-invalidated)")
     for (edge_type, source_label, target_label), rows in sorted(by_signature.items()):
         run_unwind(
             f"""UNWIND $rows AS row

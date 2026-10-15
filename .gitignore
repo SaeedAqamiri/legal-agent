@@ -24,3 +24,7 @@ PageIndex/
 
 # Stray local dir (laws-mcp workspace)
 /~/
+
+# Local data artifacts (db/falkordb dumps, corpus tarballs)
+legal-agent-data.tar.gz
+legal-agent-transfer/

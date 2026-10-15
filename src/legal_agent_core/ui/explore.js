@@ -37,7 +37,22 @@ const REL_FA = {
   BELONGS_TO_DOMAIN: "دامنه", SUBORDINATE_TO: "سلسله‌مراتب", ISSUES: "وضع‌کننده",
   AMENDS: "اصلاح", REPEALS: "نسخ", IMPLEMENTS: "مجری", INTERPRETS: "تفسیر",
   ANNULS: "ابطال", CONFLICTS_WITH: "تعارض",
+  SUPERSEDES: "حذف قبلی", REPLACES: "جایگزینی", SUSPENDS: "تعلیق", RESTORES: "ابقاء",
+  RELATED_TO: "مرتبط (منبع)",
 };
+/* relationship types of the explicit-expansion mode: direct textual reference
+ * or legal effect between two texts. IMPLEMENTS is a «به استناد» basis
+ * reference from an implementing regulation to its parent law (provenance
+ * basis:), so it belongs here. CONTAINS/PART_OF are structural bridges
+ * (provision <-> its own instrument) and cannot fan out; purely conceptual
+ * edges (BELONGS_TO_DOMAIN, ISSUES, SUBORDINATE_TO) are excluded so depth 2+
+ * stays within actually-referencing laws/articles. RELATED_TO comes from the
+ * human-curated «مستندات مرتبط» block of the source corpus. */
+const EXPLICIT_RELS = [
+  "EXPLICITLY_REFERENCES", "AMENDS", "REPEALS", "ANNULS", "SUPERSEDES", "REPLACES",
+  "SUSPENDS", "RESTORES", "CONFLICTS_WITH", "CITES", "INTERPRETS", "RELATED_TO",
+  "IMPLEMENTS", "CONTAINS", "PART_OF",
+];
 const HIDDEN_LABELS = new Set(["Instrument"]); // stale pre-rename label
 
 const byId = (id) => document.getElementById(id);
@@ -51,6 +66,16 @@ function exSetFrozen(value) {
   if (ex.network) ex.network.setOptions({ physics: { enabled: !value } });
   const btn = byId("ex-toggle-physics");
   if (btn) { btn.textContent = value ? "▶" : "⏸"; btn.classList.toggle("active", value); }
+}
+
+/* Reflect the active expansion mode on the two buttons: the active one keeps
+ * the primary/bold styling. Called when the node panel is (re)rendered and
+ * immediately on click so the feedback is instant. */
+function setExpandMode(mode) {
+  const conceptual = byId("ex-expand");
+  const explicit = byId("ex-expand-explicit");
+  if (conceptual) conceptual.classList.toggle("primary", mode !== "explicit");
+  if (explicit) explicit.classList.toggle("primary", mode === "explicit");
 }
 
 function centerOnNode(id, animate = false) {
@@ -281,7 +306,8 @@ function showNodeDetails(key) {
       <div class="ex-row ex-row-flat">
         <label>عمق</label>
         <select id="ex-expand-depth"><option>1</option><option>2</option><option>3</option></select>
-        <button id="ex-expand" class="primary">گسترش</button>
+        <button id="ex-expand">گسترش مفهومی</button>
+        <button id="ex-expand-explicit" title="فقط ارجاع/اثر صریح بین متون (ارجاع صریح، اصلاح، نسخ، ابطال و…)؛ بدون یال‌های مفهومی مثل دامنه">گسترش صریح</button>
       </div>
       <label class="ex-avoid"><input type="checkbox" id="ex-expand-avoid" checked> برای عمق ۲+ از مسیر «قانون اساسی» عبور نکن</label>
       ${ident ? "" : '<div class="muted">این گره شناسه‌ی قابل‌گسترش ندارد.</div>'}
@@ -300,11 +326,19 @@ function showNodeDetails(key) {
     </div>`;
   const expandBtn = byId("ex-expand");
   if (expandBtn && ident) {
-    expandBtn.onclick = () => expandNode(
-      ident,
-      Number(byId("ex-expand-depth").value),
-      byId("ex-expand-avoid").checked,
-    );
+    const run = (mode) => {
+      setExpandMode(mode);
+      return expandNode(
+        ident,
+        Number(byId("ex-expand-depth").value),
+        byId("ex-expand-avoid").checked,
+        mode,
+      );
+    };
+    expandBtn.onclick = () => run("conceptual");
+    byId("ex-expand-explicit").onclick = () => run("explicit");
+    // keep the last-used mode highlighted across panel re-renders
+    setExpandMode(ex.lastExpand && ex.lastExpand.mode === "explicit" ? "explicit" : "conceptual");
   }
   if (label === "Provision" && node.props.id) loadProvisionText(node.props.id);
   byId("ex-panel").querySelectorAll("[data-goto]").forEach((el) => {
@@ -375,7 +409,11 @@ function capturePositions() {
 function applyLiveFilters() {
   if (!ex.network) { syncQueryFromFilters(); return; }
   const expand = ex.lastExpand;
-  const filters = liveFilters();
+  // an explicit expansion stays explicit: rel checkboxes don't apply, only the
+  // node-type checkboxes filter the view
+  const filters = expand && expand.mode === "explicit"
+    ? { labels: liveFilters().labels, rels: new Set(EXPLICIT_RELS) }
+    : liveFilters();
   render({
     filters,
     positions: capturePositions(),
@@ -554,8 +592,11 @@ async function runCypherQuery(query, opts = {}) {
     const payload = await cypher(q, {}, 2000);
     for (const row of payload.rows) for (const cell of row) collectCell(cell);
     ex.keepIsolates = keepIsolates;
+    const filters = expand && expand.mode === "explicit"
+      ? { labels: liveFilters().labels, rels: new Set(EXPLICIT_RELS) }
+      : liveFilters();
     render(expand
-      ? { keepIsolates, focusId: expand.ident.value, filters: liveFilters() }
+      ? { keepIsolates, focusId: expand.ident.value, filters }
       : { keepIsolates });
     renderTable(payload);
     setCyMeta(payload);
@@ -635,8 +676,11 @@ function expandQuery(ident, depth, rels, avoidConstitution, labels = null) {
   return `MATCH (n) WHERE ${match}\nMATCH p=(n)-[:${rels.join("|")}*1..${depth}]-(m)${where}\nRETURN p\nLIMIT 800`;
 }
 
-async function expandNode(ident, depth, avoidConstitution = false) {
-  const rels = activeRelTypes();
+async function expandNode(ident, depth, avoidConstitution = false, mode = "conceptual") {
+  // explicit mode ignores the relationship checkboxes and traverses only
+  // direct reference/effect edges (EXPLICIT_RELS)
+  const explicit = mode === "explicit";
+  const rels = explicit ? EXPLICIT_RELS : activeRelTypes();
   if (!rels.length) { setStatus("حداقل یک نوع رابطه انتخاب کن"); return; }
   const d = Math.min(Math.max(Number(depth) || 1, 1), 3);
   const avoid = Boolean(avoidConstitution) && d > 1;
@@ -654,12 +698,16 @@ async function expandNode(ident, depth, avoidConstitution = false) {
     const payload = await cypher(fetchQ, {}, 2000);
     ex.nodes.clear(); ex.edges.clear();
     for (const row of payload.rows) collectCell(row[0]);
-    ex.lastExpand = { ident, depth: d, avoid, query: q };
-    render({ focusId: ident.value, filters: liveFilters() });
+    ex.lastExpand = { ident, depth: d, avoid, mode, query: q };
+    // in explicit mode the render filter follows the mode's rel set, so edges
+    // never stay hidden just because their checkbox is off
+    render({ focusId: ident.value, filters: explicit
+      ? { labels: liveFilters().labels, rels: new Set(EXPLICIT_RELS) }
+      : liveFilters() });
     renderTable(payload);
     setCyMeta(payload);
     const suffix = avoid ? " (بدون مسیر قانون اساسی)" : "";
-    setStatus(`گسترش عمق ${d}${suffix}: گره ${ex.nodes.size} · یال ${ex.edges.size}`);
+    setStatus(`${explicit ? "گسترش صریح" : "گسترش"} عمق ${d}${suffix}: گره ${ex.nodes.size} · یال ${ex.edges.size}`);
     showNodeDetails(ex.selected);
   } catch (error) {
     setStatus("خطا: " + String(error.message).slice(0, 120));
