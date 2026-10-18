@@ -12,8 +12,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-#: Serialized-character budget per outline part (planner-visible).
-OUTLINE_CHAR_BUDGET = 40_000
+#: Serialized-character budget per outline part (planner-visible). Kept under
+#: the loop's MAX_STEP_TEXT (6000) so a whole part reaches the model instead of
+#: being truncated mid-outline.
+OUTLINE_CHAR_BUDGET = 6_000
 
 #: Container types that render with a bracketed role marker.
 _CONTAINERS = frozenset({"chapter", "part"})

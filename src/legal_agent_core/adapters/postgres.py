@@ -510,13 +510,20 @@ class PostgresCanonicalRepository(CanonicalRepository):
         return {row[0]: float(row[1]) for row in rows}
 
     def edges_touching(self, node_id: str) -> tuple[CanonicalEdge, ...]:
-        from ..canonical import CanonicalEdgeType, CreationMethod, Provenance
+        from ..canonical import (
+            CanonicalEdgeClaim,
+            CanonicalEdgeReview,
+            CanonicalEdgeType,
+            CreationMethod,
+            Provenance,
+        )
 
         rows = self._fetchall(
             """
             SELECT edge_id, source_node_id, target_node_id, edge_type,
                    source_span_id, extraction_method, confidence, created_at,
-                   created_by, source_id, parser_version, model_id
+                   created_by, source_id, parser_version, model_id,
+                   claim, review_status
             FROM canonical.graph_edges
             WHERE source_node_id = %s OR target_node_id = %s
             ORDER BY edge_id
@@ -542,6 +549,10 @@ class PostgresCanonicalRepository(CanonicalRepository):
                     provenance=provenance,
                     source_span_id=row[4],
                     confidence=row[6],
+                    claim=CanonicalEdgeClaim(row[12]) if row[12] else None,
+                    review_status=(
+                        CanonicalEdgeReview(row[13]) if row[13] else None
+                    ),
                 )
             )
         return tuple(edges)

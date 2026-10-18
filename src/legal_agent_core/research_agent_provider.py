@@ -16,8 +16,32 @@ from .runtime_settings import LLMConfig, LLMSettingsStore
 
 logger = logging.getLogger(__name__)
 
+# Native schemas are repeated on every provider request and count toward input
+# tokens.  Keep the high-frequency research ladder plus the three precedent
+# tools; orientation/tree/notebook are injected by the controller and raw
+# graph inspection remains available elsewhere in the product.
+_RUNTIME_NATIVE_TOOLS = frozenset(
+    {
+        "search_provisions",
+        "find_in_document",
+        "read_span",
+        "get_document_structure",
+        "list_document_contents",
+        "list_documents",
+        "get_provision_version",
+        "get_version_history",
+        "temporal_check",
+        "get_related",
+        "get_statute_family",
+        "search_judgments",
+        "judgments_for_law",
+        "get_judgment_text",
+        "walk_tree",
+    }
+)
 
-def _provider_config(cfg: LLMConfig, *, timeout_seconds: float = 90.0) -> Any:
+
+def _provider_config(cfg: LLMConfig, *, timeout_seconds: float = 180.0) -> Any:
     from .llm import EndpointStyle, ProviderConfig
 
     return ProviderConfig(
@@ -26,6 +50,7 @@ def _provider_config(cfg: LLMConfig, *, timeout_seconds: float = 90.0) -> Any:
         EndpointStyle.CHAT_COMPLETIONS,
         api_key=cfg.api_key,
         timeout_seconds=timeout_seconds,
+        stream=True,
     )
 
 
@@ -43,7 +68,7 @@ def _extra_body(cfg: LLMConfig) -> dict[str, Any]:
     return {}
 
 
-def _profile(cfg: LLMConfig, *, max_output_tokens: int = 8192) -> Any:
+def _profile(cfg: LLMConfig, *, max_output_tokens: int = 3072) -> Any:
     from .llm import LLMTask, ModelProfile
 
     return ModelProfile(
@@ -70,16 +95,22 @@ class ResearchAgentProvider:
         store: LLMSettingsStore,
         *,
         graph_tools: Any | None = None,
+        notebook_tools: Any | None = None,
+        tree_tools: Any | None = None,
         config: Any | None = None,
     ) -> None:
         from .agentic.composite import CompositeTools
 
         self.canonical_tools = canonical_tools
         self.graph_tools = graph_tools
+        self.notebook_tools = notebook_tools
+        self.tree_tools = tree_tools
         self.verifier = verifier
         self.store = store
         self.agentic_config = config
-        self._composite = CompositeTools(canonical_tools, graph_tools)
+        self._composite = CompositeTools(
+            canonical_tools, graph_tools, notebook_tools, tree_tools
+        )
 
     # -------------------------------------------------------------- lifecycle
 
@@ -111,8 +142,20 @@ class ResearchAgentProvider:
 
                 return LLMToolPlanner(
                     OpenAICompatibleGateway(),
-                    _provider_config(cfg),
+                    _provider_config(
+                        cfg,
+                        timeout_seconds=min(
+                            180.0,
+                            max(
+                                5.0,
+                                float(getattr(self.agentic_config, "wall_seconds", 180.0)),
+                            ),
+                        ),
+                    ),
                     _profile(cfg),
+                    tools=self._composite.native_tool_schemas(
+                        _RUNTIME_NATIVE_TOOLS
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001 — degrade to the demo planner
                 logger.warning("research agent LLM planner unavailable: %s", exc)

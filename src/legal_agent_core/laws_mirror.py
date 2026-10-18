@@ -209,7 +209,8 @@ def sync_laws_mirror(connection, falkor_graph, batch_size: int = 2000, log=_log)
         provisions = cur.fetchall()
         cur.execute(
             """SELECT source_node_type, source_node_id, target_node_type,
-                      target_node_id, edge_type, confidence, source_id, created_by
+                      target_node_id, edge_type, confidence, source_id, created_by,
+                      claim, review_status
                  FROM canonical.graph_edges"""
         )
         edges = cur.fetchall()
@@ -289,7 +290,18 @@ def sync_laws_mirror(connection, falkor_graph, batch_size: int = 2000, log=_log)
     by_signature: dict[tuple[str, str, str], list] = defaultdict(list)
     unmapped = 0
     invalidated = 0
-    for source_type, source_id, target_type, target_id, edge_type, confidence, provenance, created_by in edges:
+    for (
+        source_type,
+        source_id,
+        target_type,
+        target_id,
+        edge_type,
+        confidence,
+        provenance,
+        created_by,
+        claim,
+        review_status,
+    ) in edges:
         # repair stage marks wrong machine-made relations this way; the row
         # stays in canonical (append-only) but must not reach the graph
         if created_by == "refs-invalidated":
@@ -306,7 +318,7 @@ def sync_laws_mirror(connection, falkor_graph, batch_size: int = 2000, log=_log)
             else None
         )
         by_signature[(edge_type, source_label, target_label)].append(
-            [source_id, target_id, confidence, basis]
+            [source_id, target_id, confidence, basis, claim, review_status]
         )
     if unmapped:
         log(f"skipped {unmapped} edges with unknown node types")
@@ -316,7 +328,8 @@ def sync_laws_mirror(connection, falkor_graph, batch_size: int = 2000, log=_log)
         run_unwind(
             f"""UNWIND $rows AS row
                 MATCH (s:{source_label} {{id: row[0]}}), (t:{target_label} {{id: row[1]}})
-                CREATE (s)-[:{edge_type.upper()} {{confidence: row[2], authority_basis: row[3]}}]->(t)""",
+                CREATE (s)-[:{edge_type.upper()} {{confidence: row[2], authority_basis: row[3],
+                        claim: row[4], review_status: row[5]}}]->(t)""",
             rows,
             edge_type.upper(),
         )

@@ -41,7 +41,9 @@ class MigrationTests(unittest.TestCase):
     def test_loads_versioned_migration_with_stable_checksum(self) -> None:
         migrations = load_migrations()
 
-        self.assertEqual([item.version for item in migrations], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+        self.assertEqual(
+            [item.version for item in migrations], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        )
         self.assertEqual(migrations[0].name, "canonical_and_research_graph")
         self.assertEqual(len(migrations[0].checksum), 64)
 
@@ -73,7 +75,7 @@ class MigrationTests(unittest.TestCase):
 
         applied = apply_migrations(connection)
 
-        self.assertEqual(applied, (1, 2, 3, 4, 5, 6, 7, 8, 9, 10))
+        self.assertEqual(applied, (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12))
         self.assertEqual(connection.commit_count, 1)
         self.assertEqual(connection.rollback_count, 0)
         insert_calls = [call for call in connection.fake_cursor.executed if "insert into" in call[0].lower()]
@@ -143,6 +145,46 @@ class MigrationTests(unittest.TestCase):
             "drop constraint if exists source_documents_doc_kind_check",
             "drop constraint if exists legal_effects_effect_type_check",
             "'annul', 'interpret', 'conflict'",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, sql)
+
+    def test_edge_claim_review_separates_legal_claim_from_validation(self) -> None:
+        migration = load_migrations()[10]
+        sql = migration.sql.lower()
+
+        self.assertEqual(migration.name, "edge_claim_review")
+        for fragment in (
+            "add column if not exists claim",
+            "add column if not exists review_status",
+            "when 'implements' then 'statutory_basis'",
+            "when 'subordinate_to' then 'display_hint'",
+            "when 'related_to' then 'site_related'",
+            "'llm_inferred'",
+            "when created_by = 'domain-hierarchy' then 'unreviewed'",
+            "where claim is null",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, sql)
+
+    def test_notebook_schema_is_event_sourced_and_tenant_isolated(self) -> None:
+        migration = load_migrations()[11]
+        sql = migration.sql.lower()
+
+        self.assertEqual(migration.name, "law_notebook")
+        for fragment in (
+            "create schema if not exists notebook",
+            "create table notebook.topics",
+            "create table notebook.events",
+            "create table notebook.routes",
+            "create table notebook.pages",
+            "route_taken",
+            "answer_confirmed",
+            "confirmed_hits",
+            "needs_revalidation",
+            "enable row level security",
+            "force row level security",
+            "notebook_events_tenant_isolation",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, sql)

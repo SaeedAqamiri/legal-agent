@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>درخت قوانین و دفترچه — عامل پژوهش حقوقی</title>
+<link rel="stylesheet" href="/ui/laws.css?v=3">
+<style>
+  .tree-wrap { display: grid; grid-template-columns: 1.4fr 1fr; gap: 14px; padding: 14px; }
+  .tree-wrap > section { background: #fff; border: 1px solid #e3e6ea; border-radius: 10px; padding: 12px; overflow: auto; max-height: calc(100vh - 130px); }
+  details { margin: 2px 0 2px 8px; }
+  summary { cursor: pointer; padding: 2px 4px; border-radius: 6px; }
+  summary:hover { background: #f3f6fa; }
+  .badge { font-size: 11px; padding: 1px 6px; border-radius: 8px; margin-inline-start: 6px; }
+  .b-branch { background: #e7f0ff; color: #1c4f9c; }
+  .b-domain { background: #eafaf0; color: #1b7a45; }
+  .b-instrument { background: #f4f4f6; color: #444; }
+  .b-derivation { background: #fff2d8; color: #8a5a00; }
+  .b-topic { background: #f0f0f0; color: #777; }
+  .b-tier { background: #efe9ff; color: #5a3fae; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid #eef1f4; }
+  .muted { color: #888; }
+  .stale { background: #ffe8e8; color: #a11; border-radius: 8px; padding: 1px 6px; font-size: 11px; }
+  .hint { padding: 10px 14px; color: #666; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">⚖️ عامل پژوهش حقوقی<small>درخت نمایشی قوانین و دفترچهٔ پژوهش</small></div>
+  <nav>
+    <a href="/workspace">میز کار</a>
+    <a href="/ui/graph.html?v=3">گراف</a>
+    <a href="/ui/laws.html">قوانین</a>
+    <a href="/ui/tree.html" class="active">درخت و دفترچه</a>
+  </nav>
+</header>
+<div class="hint">درخت نمایشی، یک <b>projection</b> است (نه ادعای حقوقی): یال <code>derivation</code> از یال <code>implements</code> می‌آید و <code>topic</code> از دامنهٔ موضوعی. دفترچه، مسیرهای آموخته از پژوهش‌های <b>تأییدشده</b> را نگه می‌دارد و فقط کوتاه‌کنندهٔ ناوبری است.</div>
+<div class="tree-wrap">
+  <section id="tree"><div class="muted">در حال بارگذاری درخت…</div></section>
+  <section id="notebook"><div class="muted">در حال بارگذاری دفترچه…</div></section>
+</div>
+<script src="/ui/tree.js?v=1"></script>
+</body>
+</html>

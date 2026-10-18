@@ -15,6 +15,7 @@ from .canonical import (
     SourceDocument,
     SourceSpan,
 )
+from .notebook import NotebookEvent, NotebookPage, NotebookRoute
 from .research import MemoryEvent, ProgressiveRelation, TrustStatus
 
 
@@ -143,3 +144,36 @@ class ResearchGraphRepository(ABC):
 
     @abstractmethod
     def events(self, organization_id: str) -> tuple[MemoryEvent, ...]: ...
+
+
+class NotebookRepository(ABC):
+    """Storage port for the organization-scoped law notebook (docs 06 §6)."""
+
+    @abstractmethod
+    def save_events(self, events: tuple[NotebookEvent, ...]) -> None: ...
+
+    @abstractmethod
+    def upsert_route(
+        self,
+        organization_id: str,
+        topic_id: str,
+        to_node_id: str,
+        *,
+        hit: bool,
+        confirmed: bool,
+        source_episode_id: str | None = None,
+    ) -> None: ...
+
+    @abstractmethod
+    def get_page(self, organization_id: str, node_id: str) -> NotebookPage | None: ...
+
+    @abstractmethod
+    def pages(self, organization_id: str, kind: str | None = None) -> tuple[NotebookPage, ...]: ...
+
+    @abstractmethod
+    def routes(
+        self, organization_id: str, topic_id: str | None = None
+    ) -> tuple[NotebookRoute, ...]: ...
+
+    @abstractmethod
+    def upsert_page(self, page: NotebookPage) -> None: ...

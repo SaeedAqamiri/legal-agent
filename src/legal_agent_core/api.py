@@ -1059,6 +1059,72 @@ def create_app(container: APIContainer) -> FastAPI:
             raise DomainError("LLM settings are not available in this deployment")
         return provider
 
+    @app.get(
+        "/v1/organizations/{organization_id}/display-tree", tags=["notebook"]
+    )
+    def get_display_tree(
+        organization_id: str, principal: CurrentPrincipal
+    ) -> dict[str, Any]:
+        """The display-tree projection (docs/qavanin/06 §4) as JSON.
+
+        Read from the artifact produced by scripts/build_display_tree.py; a
+        404 with a hint is returned when it has not been built yet.
+        """
+        container.authorization.require(
+            principal, Permission.READ_LIBRARY, organization_id
+        )
+        import json
+        import os
+        from pathlib import Path
+
+        path = Path(os.environ.get("LEGAL_AGENT_DISPLAY_TREE", "out/display_tree.json"))
+        if not path.exists():
+            raise NotFoundError(
+                "display tree not built; run scripts/build_display_tree.py"
+            )
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    @app.get("/v1/organizations/{organization_id}/notebook", tags=["notebook"])
+    def get_notebook(
+        organization_id: str, principal: CurrentPrincipal
+    ) -> dict[str, Any]:
+        """Notebook pages + learned research routes for the org (docs 06 §6–8)."""
+        container.authorization.require(
+            principal, Permission.READ_LIBRARY, organization_id
+        )
+        from .adapters.postgres import PostgresCanonicalRepository
+        from .adapters.postgres_notebook import PostgresNotebookRepository
+
+        canonical = library.canonical
+        if not isinstance(canonical, PostgresCanonicalRepository):
+            raise DomainError("notebook requires the postgres canonical repository")
+        repo = PostgresNotebookRepository(canonical.connection)
+        pages = repo.pages(organization_id)
+        routes = repo.routes(organization_id)
+        return {
+            "pages": [
+                {
+                    "node_id": page.node_id,
+                    "kind": page.kind,
+                    "path": page.path,
+                    "summary": page.summary,
+                    "needs_revalidation": page.needs_revalidation,
+                }
+                for page in pages
+            ],
+            "routes": [
+                {
+                    "topic_id": route.topic_id,
+                    "to_node_id": route.to_node_id,
+                    "weight": route.weight,
+                    "hits": route.hits,
+                    "confirmed_hits": route.confirmed_hits,
+                    "status": route.status,
+                }
+                for route in routes
+            ],
+        }
+
     @app.get("/v1/settings/llm", tags=["settings"])
     def get_llm_settings(principal: CurrentPrincipal) -> dict[str, Any]:
         """Current LLM gateway configuration (API key masked)."""

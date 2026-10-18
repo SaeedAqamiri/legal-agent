@@ -369,6 +369,22 @@ def _connect_laws_graph(settings: Settings) -> Any:
         return None
 
 
+#: Tools hidden from the planner catalog (docs 06 §8): their behaviour is
+#: covered by a kept tool, so exposing them only adds selection burden. They
+#: remain callable for back-compat and direct use.
+_PLANNER_HIDDEN_TOOLS: frozenset[str] = frozenset(
+    {
+        "list_document_contents",  # covered by get_document_structure / list_children
+        "get_provision_version",  # covered by read_span
+        "find_nodes",  # covered by search_laws
+        "list_provisions",  # covered by get_document_structure / list_children
+        "node_neighbors",  # covered by get_related
+        "find_paths",  # covered by get_related
+        "graph_stats",  # rarely needed by the research agent
+    }
+)
+
+
 def _research_agent_provider(
     settings: Settings, canonical: Any, research_graph: Any, laws_graph: Any
 ) -> Any:
@@ -381,13 +397,28 @@ def _research_agent_provider(
     from .runtime_settings import LLMSettingsStore, default_settings_path
     from .verification import EvidenceVerifier
 
+    notebook_repo = None
+    if isinstance(canonical, PostgresCanonicalRepository):
+        from .adapters.postgres_notebook import PostgresNotebookRepository
+
+        notebook_repo = PostgresNotebookRepository(canonical.connection)
+
+    def notebook_lookup(instrument_id: str) -> str | None:  # type: ignore[misc]
+        if notebook_repo is None:
+            return None
+        page = notebook_repo.get_page(settings.default_organization_id, instrument_id)
+        return page.summary if page is not None else None
+
     canonical_tools = LegalResearchTools(
         canonical,
         research_graph,
         structure_summaries=_structure_summaries(settings),
+        hidden_tools=_PLANNER_HIDDEN_TOOLS,
+        notebook_lookup=notebook_lookup,
         **_agentic_extras(settings, canonical),
     )
     graph_tools = None
+    notebook_tools = None
     if laws_graph is not None:
         provision_text = judgment_text = None
         if isinstance(canonical, PostgresCanonicalRepository):
@@ -404,24 +435,63 @@ def _research_agent_provider(
             provision_text=provision_text,
             judgment_text=judgment_text,
         )
+    if notebook_repo is not None:
+        from .agentic.notebook_tools import NotebookTools
+
+        notebook_tools = NotebookTools(notebook_repo, settings.default_organization_id)
+    tree_tools = None
+    from .agentic.tree_tools import TreeTools
+
+    tree = _load_display_tree()
+    if tree is not None:
+        tree_tools = TreeTools(tree)
     return ResearchAgentProvider(
         canonical_tools,
         EvidenceVerifier(canonical),
         LLMSettingsStore(default_settings_path()),
         graph_tools=graph_tools,
+        notebook_tools=notebook_tools,
+        tree_tools=tree_tools,
         config=_agentic_config(),
     )
 
-
 def _agentic_config() -> Any:
-    """Production research budget (reading rulings is token-heavy)."""
+    """Production research budget (reading rulings is token-heavy).
+
+    Fixed step/search/tool limits are opt-in for evaluation. Production follows
+    evidence progress; wall and token limits remain emergency safeguards.
+    """
+    import os
+
     from .agentic.loop import AgenticConfig
 
     return AgenticConfig(
-        max_steps=16,
-        wall_seconds=300.0,
-        max_total_tokens=150_000,
-        recent_full_steps=2,
+        max_steps=(
+            int(value)
+            if (value := os.environ.get("LEGAL_AGENT_AGENTIC_MAX_STEPS"))
+            else None
+        ),
+        wall_seconds=float(os.environ.get("LEGAL_AGENT_AGENTIC_WALL", "900")),
+        max_total_tokens=int(
+            os.environ.get("LEGAL_AGENT_AGENTIC_MAX_TOTAL_TOKENS", "120000")
+        ),
+        recent_full_steps=1,
+        max_search_steps=(
+            int(value)
+            if (value := os.environ.get("LEGAL_AGENT_AGENTIC_MAX_SEARCH_STEPS"))
+            else None
+        ),
+        max_tool_calls=(
+            int(value)
+            if (value := os.environ.get("LEGAL_AGENT_AGENTIC_MAX_TOOL_CALLS"))
+            else None
+        ),
+        answer_reserve_steps=int(
+            os.environ.get("LEGAL_AGENT_AGENTIC_ANSWER_RESERVE_STEPS", "2")
+        ),
+        max_tool_seconds=float(
+            os.environ.get("LEGAL_AGENT_AGENTIC_MAX_TOOL_SECONDS", "60")
+        ),
     )
 
 
@@ -439,6 +509,44 @@ def _graph_chat_provider(settings: Settings, laws_graph: Any, canonical: Any = N
     return GraphChatProvider(laws_graph, canonical, store)
 
 
+def _load_display_tree(tree_path: str = "out/display_tree.json") -> Any:
+    """Load the display-tree projection once (None when not built yet)."""
+    import json
+    from pathlib import Path
+
+    path = Path(tree_path)
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _notebook_topic_resolver(tree_path: str = "out/display_tree.json") -> Any:
+    """node_id -> notebook topic id, from the display tree (docs 06 §4/§7).
+
+    Instruments map to their domain topic; branch/domain ids map to themselves;
+    anything unknown falls back to the root topic. Returns None if the tree is
+    not present so notebook capture degrades to the root topic.
+    """
+    tree = _load_display_tree(tree_path)
+    if tree is None:
+        return None
+    node_topic: dict[str, str] = {}
+
+    def walk(node: dict, topic: str | None) -> None:
+        current = node["id"] if node.get("kind") in {"branch", "domain"} else topic
+        if node.get("kind") == "instrument":
+            node_topic[node["id"]] = current or "root"
+        for child in node.get("children", []):
+            walk(child, current)
+
+    walk(tree, "root")
+
+    def resolve(node_id: str) -> str:
+        return node_topic.get(node_id, "root")
+
+    return resolve
+
+
 def create_app_from_env(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     canonical = _canonical_repository(settings)
@@ -451,6 +559,18 @@ def create_app_from_env(settings: Settings | None = None) -> FastAPI:
     # tools can navigate the projection from the first run.
     laws_graph = _connect_laws_graph(settings)
     start_laws_mirror_sync(settings)
+
+    notebook_repo = None
+    notebook_resolver = None
+    from .adapters.postgres import PostgresCanonicalRepository
+
+    if isinstance(canonical, PostgresCanonicalRepository):
+        from .adapters.postgres_notebook import PostgresNotebookRepository
+
+        notebook_repo = PostgresNotebookRepository(canonical.connection)
+        notebook_resolver = _notebook_topic_resolver()
+
+    memory = _seed_graph_memory(graph, settings.default_organization_id, canonical)
 
     research = ResearchApplicationService(
         NavigationLoop(
@@ -465,8 +585,10 @@ def create_app_from_env(settings: Settings | None = None) -> FastAPI:
         metrics,
         id_factory=lambda: f"req-{next(identifiers)}",
         agentic=_research_agent_provider(settings, canonical, graph, laws_graph),
+        notebook=notebook_repo,
+        notebook_topic_resolver=notebook_resolver,
+        memory=memory,
     )
-    memory = _seed_graph_memory(graph, settings.default_organization_id, canonical)
     reviews = KnowledgeReviewApplicationService(memory, authorization, metrics)
 
     token_verifier = _token_verifier(settings)
@@ -579,6 +701,12 @@ def start_laws_mirror_sync(settings: Settings) -> None:
     Opens its own Postgres connection: psycopg connections are not thread-safe.
     """
     if not settings.falkor.enabled or not settings.postgres.enabled:
+        return
+    import os
+
+    if os.environ.get("LEGAL_AGENT_SKIP_MIRROR_SYNC", "").lower() in {"1", "true", "yes"}:
+        # Eval/dev restarts: skip the ~7-9 min full rebuild when the graph is
+        # already in sync (avoids racing restarts with in-flight requests).
         return
 
     def _run() -> None:

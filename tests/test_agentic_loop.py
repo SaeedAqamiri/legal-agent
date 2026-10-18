@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 import unittest
 from datetime import date
 
@@ -207,6 +208,34 @@ class ToolResearchLoopTests(unittest.TestCase):
         self.assertTrue(outcome.completed)
         self.assertTrue(outcome.ledger.entries)
 
+    def test_search_preserves_compound_legal_phrase_from_question(self) -> None:
+        planner = ScriptedPlanner(
+            [
+                PlannerDecision(
+                    "tool",
+                    tool="search_provisions",
+                    args={
+                        "query": "بدهی شرکت مدیر",
+                        "applicable_time": APPLICABLE.isoformat(),
+                    },
+                ),
+                PlannerDecision("abstain", abstention_reason="پایان آزمون"),
+            ]
+        )
+        loop = _loop(self.repository, planner, max_steps=2)
+        loop.run(
+            episode_id="episode-anchor",
+            organization_id="org-a",
+            user_id="user-1",
+            conversation_id="conversation-1",
+            question=(
+                "آیا خانه مدیرعامل شرکت با مسئولیت محدود برای بدهی حق بیمه "
+                "قابل توقیف است؟"
+            ),
+            applicable_time=APPLICABLE,
+        )
+        self.assertIn("مسئولیت محدود", loop.last_trace[0].args["query"])
+
     def test_explicit_abstention_is_honest_incomplete(self) -> None:
         planner = ScriptedPlanner(
             [
@@ -256,10 +285,9 @@ class ToolResearchLoopTests(unittest.TestCase):
             outcome.episode.identified_issues,
         )
 
-    def test_unevidenced_minor_claim_is_dropped_and_answer_still_publishes(self) -> None:
-        # Regression: previously verification accepted an unevidenced MINOR
-        # claim (warning only) and then CitationPipeline.publish crashed,
-        # failing the whole case. The loop now drops such claims.
+    def test_unevidenced_claim_forces_consistent_answer_rewrite(self) -> None:
+        # An unevidenced claim cannot be dropped while its prose remains in the
+        # answer. The whole answer is returned to the planner for a rewrite.
         planner = ScriptedPlanner(
             [
                 PlannerDecision(
@@ -293,9 +321,8 @@ class ToolResearchLoopTests(unittest.TestCase):
         )
         outcome = _run(_loop(self.repository, planner, max_steps=4))
         self.assertTrue(outcome.completed)
-        self.assertIn(
-            "dropped_unevidenced_claims", outcome.episode.identified_issues
-        )
+        self.assertIn("claimهای بدون شاهد", planner.prompts[2][1])
+        self.assertNotIn("مشاوره حقوقی نیست", outcome.draft.text)
         published = CitationPipeline(self.repository).publish(
             outcome.draft, outcome.verification, outcome.ledger, APPLICABLE
         )
@@ -332,7 +359,7 @@ class ToolResearchLoopTests(unittest.TestCase):
         )
         outcome = _run(_loop(self.repository, planner, max_steps=4))
         self.assertTrue(outcome.completed)
-        self.assertIn("unknown evidence ids", planner.prompts[1][1])
+        self.assertIn("شناسه‌های ناشناخته", planner.prompts[1][1])
 
     def test_blank_question_is_rejected(self) -> None:
         loop = _loop(self.repository, ScriptedPlanner([]))
@@ -357,6 +384,438 @@ class ToolResearchLoopTests(unittest.TestCase):
             IncompleteReason.LLM_ERROR.value,
             outcome.episode.identified_issues,
         )
+
+    def test_wall_deadline_is_checked_after_slow_planner_call(self) -> None:
+        class SlowPlanner:
+            def decide(self, system_prompt: str, user_prompt: str) -> PlannerTurn:
+                time.sleep(0.02)
+                return _turn(PlannerDecision("answer", answer="دیر رسید."))
+
+        outcome = _run(
+            _loop(self.repository, SlowPlanner(), wall_seconds=0.005, max_steps=2)
+        )
+        self.assertFalse(outcome.completed)
+        self.assertIn(
+            IncompleteReason.BUDGET_WALL.value,
+            outcome.episode.identified_issues,
+        )
+
+    def test_remaining_wall_time_is_passed_to_bounded_planner(self) -> None:
+        class BoundedPlanner:
+            timeout: float | None = None
+
+            def decide_with_timeout(
+                self,
+                system_prompt: str,
+                user_prompt: str,
+                *,
+                timeout_seconds: float,
+            ) -> PlannerTurn:
+                self.timeout = timeout_seconds
+                return _turn(PlannerDecision("abstain", abstention_reason="آزمون"))
+
+            def decide(self, system_prompt: str, user_prompt: str) -> PlannerTurn:
+                raise AssertionError("unbounded planner path used")
+
+        planner = BoundedPlanner()
+        _run(_loop(self.repository, planner, wall_seconds=0.2, max_steps=1))
+        self.assertIsNotNone(planner.timeout)
+        self.assertGreater(planner.timeout, 0.0)  # type: ignore[operator]
+        self.assertLessEqual(planner.timeout, 0.2)  # type: ignore[operator]
+
+    def test_planner_call_emits_latency_tokens_and_action(self) -> None:
+        events: list[dict] = []
+        loop = _loop(
+            self.repository,
+            ScriptedPlanner(
+                [PlannerDecision("abstain", abstention_reason="آزمون ثبت تصمیم")]
+            ),
+            max_steps=1,
+        )
+        _run(loop, progress=events.append)
+
+        planner_events = [event for event in events if event["type"] == "planner_call"]
+        self.assertEqual(len(planner_events), 1)
+        event = planner_events[0]
+        self.assertTrue(event["ok"])
+        self.assertEqual(event["step"], 1)
+        self.assertEqual(event["attempt"], 1)
+        self.assertEqual(event["action"], "abstain")
+        self.assertEqual(event["input_tokens"], 100)
+        self.assertEqual(event["output_tokens"], 100)
+        self.assertGreaterEqual(event["latency_ms"], 0)
+        self.assertEqual(len(loop.last_planner_trace), 1)
+
+    def test_last_step_disables_native_tool_choice(self) -> None:
+        class ForceAwarePlanner:
+            forced = False
+
+            def decide(
+                self,
+                system_prompt: str,
+                user_prompt: str,
+                *,
+                force_answer: bool = False,
+            ) -> PlannerTurn:
+                self.forced = force_answer
+                return _turn(
+                    PlannerDecision("abstain", abstention_reason="بودجه پایان یافت")
+                )
+
+        planner = ForceAwarePlanner()
+        _run(_loop(self.repository, planner, max_steps=1))
+        self.assertTrue(planner.forced)
+
+    def test_search_budget_forces_next_turn_to_finalize(self) -> None:
+        class ForceAwarePlanner:
+            calls = 0
+            final_forced = False
+
+            def decide(
+                self,
+                system_prompt: str,
+                user_prompt: str,
+                *,
+                force_answer: bool = False,
+            ) -> PlannerTurn:
+                self.calls += 1
+                if self.calls == 1:
+                    if force_answer:
+                        raise AssertionError(
+                            "first research turn must keep tools available"
+                        )
+                    return _turn(
+                        PlannerDecision(
+                            "tool",
+                            tool="search_provisions",
+                            args={
+                                "query": "مهلت تجدیدنظر",
+                                "applicable_time": APPLICABLE.isoformat(),
+                            },
+                        )
+                    )
+                self.final_forced = force_answer
+                return _turn(
+                    PlannerDecision("abstain", abstention_reason="بودجهٔ جست‌وجو تمام شد")
+                )
+
+        planner = ForceAwarePlanner()
+        _run(
+            _loop(
+                self.repository,
+                planner,
+                max_steps=3,
+                max_search_steps=1,
+            )
+        )
+        self.assertEqual(planner.calls, 2)
+        self.assertTrue(planner.final_forced)
+
+    def test_failed_search_attempt_consumes_search_budget(self) -> None:
+        class FailingSearchTools:
+            def spec_available(self, name: str) -> bool:
+                return False
+
+            def dispatch(self, store, name: str, args: dict):
+                raise DomainError("database unavailable")
+
+            def tool_catalog(self) -> str:
+                return "search_provisions(query, applicable_time)"
+
+        class ForceAwarePlanner:
+            calls = 0
+            final_forced = False
+
+            def decide(
+                self,
+                system_prompt: str,
+                user_prompt: str,
+                *,
+                force_answer: bool = False,
+            ) -> PlannerTurn:
+                self.calls += 1
+                if self.calls == 1:
+                    return _turn(
+                        PlannerDecision(
+                            "tool",
+                            tool="search_provisions",
+                            args={
+                                "query": "مهلت تجدیدنظر",
+                                "applicable_time": APPLICABLE.isoformat(),
+                            },
+                        )
+                    )
+                self.final_forced = force_answer
+                return _turn(
+                    PlannerDecision("abstain", abstention_reason="جست‌وجو شکست خورد")
+                )
+
+        planner = ForceAwarePlanner()
+        loop = ToolResearchLoop(
+            FailingSearchTools(),
+            planner,
+            EvidenceVerifier(self.repository),
+            AgenticConfig(max_steps=3, max_search_steps=1),
+        )
+        _run(loop)
+        self.assertEqual(planner.calls, 2)
+        self.assertTrue(planner.final_forced)
+
+    def test_total_tool_budget_forces_next_turn_to_finalize(self) -> None:
+        class ForceAwarePlanner:
+            calls = 0
+            final_forced = False
+
+            def decide(
+                self,
+                system_prompt: str,
+                user_prompt: str,
+                *,
+                force_answer: bool = False,
+            ) -> PlannerTurn:
+                self.calls += 1
+                if self.calls == 1:
+                    return _turn(
+                        PlannerDecision(
+                            "tool",
+                            tool="find_in_document",
+                            args={
+                                "document": "سند ناموجود",
+                                "query": "مهلت تجدیدنظر",
+                                "applicable_time": APPLICABLE.isoformat(),
+                            },
+                        )
+                    )
+                self.final_forced = force_answer
+                return _turn(
+                    PlannerDecision("abstain", abstention_reason="بودجهٔ ابزار تمام شد")
+                )
+
+        planner = ForceAwarePlanner()
+        _run(
+            _loop(
+                self.repository,
+                planner,
+                max_steps=3,
+                max_tool_calls=1,
+            )
+        )
+        self.assertEqual(planner.calls, 2)
+        self.assertTrue(planner.final_forced)
+
+    def test_default_policy_does_not_end_after_three_distinct_searches(self) -> None:
+        planner = ScriptedPlanner(
+            [
+                PlannerDecision(
+                    "tool",
+                    tool="search_provisions",
+                    args={"query": query, "applicable_time": APPLICABLE.isoformat()},
+                )
+                for query in (
+                    "مهلت تجدیدنظر",
+                    "نحوه اعتراض",
+                    "قطعیت مطالبات",
+                    "ابلاغ تصمیم",
+                )
+            ]
+            + [PlannerDecision("abstain", abstention_reason="پایان بررسی")]
+        )
+        loop = _loop(self.repository, planner)
+        _run(loop)
+        self.assertEqual(
+            len([item for item in loop.last_trace if item.tool == "search_provisions" and item.ok]),
+            4,
+        )
+        self.assertNotIn("۳ جست‌وجوی سراسری", planner.prompts[0][0])
+
+    def test_similar_search_is_redirected_without_ending_research(self) -> None:
+        class PivotAwarePlanner(ScriptedPlanner):
+            exclusions: list[frozenset[str]]
+
+            def __init__(self, script) -> None:
+                super().__init__(script)
+                self.exclusions = []
+
+            def decide(
+                self,
+                system_prompt: str,
+                user_prompt: str,
+                *,
+                excluded_tools: frozenset[str] = frozenset(),
+            ) -> PlannerTurn:
+                self.exclusions.append(excluded_tools)
+                return super().decide(system_prompt, user_prompt)
+
+        planner = PivotAwarePlanner(
+            [
+                PlannerDecision(
+                    "tool",
+                    tool="search_provisions",
+                    args={
+                        "query": "مهلت تجدیدنظر اشخاص مقیم",
+                        "applicable_time": APPLICABLE.isoformat(),
+                    },
+                ),
+                PlannerDecision(
+                    "tool",
+                    tool="search_provisions",
+                    args={
+                        "query": "مهلت تجدیدنظر اشخاص مقیم ایران",
+                        "applicable_time": APPLICABLE.isoformat(),
+                    },
+                ),
+                PlannerDecision(
+                    "tool",
+                    tool="find_in_document",
+                    args={
+                        "document": "سند ناموجود",
+                        "query": "مهلت تجدیدنظر",
+                        "applicable_time": APPLICABLE.isoformat(),
+                    },
+                ),
+                PlannerDecision("abstain", abstention_reason="پایان بررسی"),
+            ]
+        )
+        loop = _loop(self.repository, planner, max_steps=4)
+        _run(loop)
+        self.assertEqual(loop.last_trace[1].error, "near-duplicate broad search")
+        self.assertIn("NEAR-DUPLICATE-SEARCH", planner.prompts[2][1])
+        self.assertEqual(planner.exclusions[2], frozenset({"search_provisions"}))
+        self.assertEqual(loop.last_trace[2].tool, "find_in_document")
+
+    def test_different_queries_with_same_evidence_trigger_route_change(self) -> None:
+        repository = self.repository
+
+        class SameResultsTools:
+            def __init__(self) -> None:
+                self.canonical = LegalResearchTools(repository)
+
+            def spec_available(self, name: str) -> bool:
+                return False
+
+            def dispatch(self, store, name: str, args: dict):
+                return self.canonical.dispatch(
+                    store,
+                    name,
+                    {
+                        "query": "مهلت تجدیدنظر",
+                        "applicable_time": APPLICABLE.isoformat(),
+                    },
+                )
+
+            def tool_catalog(self) -> str:
+                return "search_provisions(query, applicable_time)"
+
+        class ObservingPlanner:
+            exclusions: list[frozenset[str]]
+
+            def __init__(self) -> None:
+                self.exclusions = []
+
+            def decide(
+                self,
+                system_prompt: str,
+                user_prompt: str,
+                *,
+                excluded_tools: frozenset[str] = frozenset(),
+            ) -> PlannerTurn:
+                self.exclusions.append(excluded_tools)
+                if len(self.exclusions) <= 2:
+                    query = (
+                        "مهلت تجدیدنظر"
+                        if len(self.exclusions) == 1
+                        else "آیین دادرسی اعتراض به رای"
+                    )
+                    return _turn(
+                        PlannerDecision(
+                            "tool",
+                            tool="search_provisions",
+                            args={
+                                "query": query,
+                                "applicable_time": APPLICABLE.isoformat(),
+                            },
+                        )
+                    )
+                return _turn(
+                    PlannerDecision("abstain", abstention_reason="پایان بررسی")
+                )
+
+        planner = ObservingPlanner()
+        loop = ToolResearchLoop(
+            SameResultsTools(),
+            planner,
+            EvidenceVerifier(repository),
+            AgenticConfig(max_steps=4),
+        )
+        _run(loop)
+        self.assertEqual(planner.exclusions[2], frozenset({"search_provisions"}))
+        self.assertEqual(len([item for item in loop.last_trace if item.ok]), 2)
+
+    def test_slow_orientation_tool_cannot_consume_past_run_deadline(self) -> None:
+        class SlowOrientationTools:
+            def spec_available(self, name: str) -> bool:
+                return name == "walk_tree"
+
+            def dispatch(self, store, name: str, args: dict):
+                time.sleep(0.2)
+                raise AssertionError("late orientation result must be ignored")
+
+            def tool_catalog(self) -> str:
+                return "walk_tree(topic, limit?)"
+
+        loop = ToolResearchLoop(
+            SlowOrientationTools(),
+            ScriptedPlanner([]),
+            EvidenceVerifier(self.repository),
+            AgenticConfig(wall_seconds=0.01, max_steps=1),
+        )
+        started = time.monotonic()
+        outcome = _run(loop)
+        elapsed = time.monotonic() - started
+        self.assertFalse(outcome.completed)
+        self.assertLess(elapsed, 0.1)
+        self.assertIn(
+            IncompleteReason.BUDGET_WALL.value,
+            outcome.episode.identified_issues,
+        )
+
+    def test_slow_research_tool_cannot_consume_past_run_deadline(self) -> None:
+        class SlowResearchTools:
+            def spec_available(self, name: str) -> bool:
+                return False
+
+            def dispatch(self, store, name: str, args: dict):
+                time.sleep(0.2)
+                raise AssertionError("late tool result must be ignored")
+
+            def tool_catalog(self) -> str:
+                return "search_provisions(query, applicable_time)"
+
+        planner = ScriptedPlanner(
+            [
+                PlannerDecision(
+                    "tool",
+                    tool="search_provisions",
+                    args={"query": "مهلت", "applicable_time": APPLICABLE.isoformat()},
+                )
+            ]
+        )
+        loop = ToolResearchLoop(
+            SlowResearchTools(),
+            planner,
+            EvidenceVerifier(self.repository),
+            AgenticConfig(wall_seconds=0.01, max_steps=1),
+        )
+        started = time.monotonic()
+        outcome = _run(loop)
+        elapsed = time.monotonic() - started
+        self.assertFalse(outcome.completed)
+        self.assertLess(elapsed, 0.1)
+        self.assertIn(
+            IncompleteReason.BUDGET_WALL.value,
+            outcome.episode.identified_issues,
+        )
+        self.assertEqual(loop.last_trace[-1].error, "research wall-clock deadline exceeded during tool call")
 
 
 class ApplicationStrategyTests(unittest.TestCase):
@@ -462,6 +921,27 @@ class TranscriptCompactionTests(unittest.TestCase):
         self.assertIn("ev=ev-", final_prompt)
         self.assertNotIn('"result_ref": "r1"', final_prompt)  # old envelope gone
         self.assertIn('"result_ref": "r4"', final_prompt)  # recent envelope kept
+        self.assertIn("بستهٔ شواهد پایدار", final_prompt)
+        self.assertIn("مهلت درخواست تجدیدنظر", final_prompt)
+
+    def test_cached_repeat_replays_payload_after_original_step_compacts(self) -> None:
+        first = self._search("مهلت تجدیدنظر")
+        planner = ScriptedPlanner(
+            [
+                first,
+                self._search("مهلت اعتراض"),
+                self._search("مهلت واخواهی"),
+                first,
+                PlannerDecision("answer", answer="مهلت سی روز است."),
+            ]
+        )
+        outcome = _run(
+            _loop(self.repository, planner, max_steps=5, recent_full_steps=1)
+        )
+        self.assertTrue(outcome.completed)
+        prompt_after_replay = planner.prompts[4][1]
+        self.assertIn("REPLAY-CACHED search_provisions", prompt_after_replay)
+        self.assertIn("مهلت درخواست تجدیدنظر", prompt_after_replay)
 
     def test_budget_warning_visible_before_last_steps(self) -> None:
         planner = ScriptedPlanner([self._search()], repeat_last=True)
@@ -474,6 +954,14 @@ class TranscriptCompactionTests(unittest.TestCase):
     def test_recent_full_steps_validation(self) -> None:
         with self.assertRaises(DomainError):
             AgenticConfig(recent_full_steps=-1)
+
+    def test_max_tool_seconds_validation(self) -> None:
+        with self.assertRaises(DomainError):
+            AgenticConfig(max_tool_seconds=0)
+
+    def test_max_tool_calls_validation(self) -> None:
+        with self.assertRaises(DomainError):
+            AgenticConfig(max_tool_calls=0)
 
 
 class PlannerParsingTests(unittest.TestCase):
@@ -515,6 +1003,25 @@ class DeadEndGuardTests(unittest.TestCase):
         # در گام ۳ (فقط ۲ خالی) هنوز نباید باشد
         third_prompt = planner.prompts[2][1]
         self.assertNotIn("هشدار بن‌بست", third_prompt)
+
+    def test_broad_search_budget_is_enforced_by_controller(self) -> None:
+        repository = build_canonical()
+        planner = ScriptedPlanner(
+            [
+                PlannerDecision(
+                    "tool",
+                    tool="search_provisions",
+                    args={"query": query, "applicable_time": APPLICABLE.isoformat()},
+                )
+                for query in ("مهلت", "اعتراض", "تجدیدنظر", "واخواهی")
+            ]
+        )
+        loop = _loop(repository, planner, max_steps=4, max_search_steps=2)
+        outcome = _run(loop)
+        self.assertFalse(outcome.completed)
+        self.assertIn("SEARCH-BUDGET-EXHAUSTED", planner.prompts[3][1])
+        blocked = [item for item in loop.last_trace if item.error == "broad search budget exhausted"]
+        self.assertEqual(len(blocked), 2)
 
 
 if __name__ == "__main__":

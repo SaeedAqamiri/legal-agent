@@ -11,6 +11,7 @@ from legal_agent_core.agentic.tools import (
     is_known_tool,
     tool_catalog,
 )
+from legal_agent_core.canonical import SourceSpan
 from legal_agent_core.errors import DomainError
 from legal_agent_core.retrieval import search_tokens
 
@@ -232,6 +233,38 @@ class TemporalAndHistoryTests(unittest.TestCase):
             applicable_time=APPLICABLE.isoformat(),
         )
         self.assertEqual(missing.envelope.status, ToolStatus.NOT_FOUND)
+
+    def test_read_span_continues_long_text_with_offset(self) -> None:
+        long_text = "ا" * 4500 + "پایان"
+        self.repository.add_source_span(
+            SourceSpan(
+                "span-demo-long",
+                "source-demo",
+                "document-demo-v2",
+                "provision-demo-336-v2",
+                18,
+                long_text,
+                char_start=0,
+                char_end=len(long_text),
+            )
+        )
+        first = self._dispatch(
+            "read_span",
+            source_span_id="span-demo-long",
+            applicable_time=APPLICABLE.isoformat(),
+        )
+        first_item = first.envelope.items[0]
+        self.assertTrue(first_item["has_more"])
+        self.assertEqual(first_item["next_offset"], 4000)
+        second = self._dispatch(
+            "read_span",
+            source_span_id="span-demo-long",
+            applicable_time=APPLICABLE.isoformat(),
+            offset=first_item["next_offset"],
+        )
+        self.assertEqual(second.envelope.items[0]["text_offset"], 4000)
+        self.assertTrue(second.envelope.items[0]["text"].endswith("پایان"))
+        self.assertFalse(second.envelope.items[0]["has_more"])
 
     def test_references_include_resolved_targets(self) -> None:
         add_resolved_reference(self.repository)

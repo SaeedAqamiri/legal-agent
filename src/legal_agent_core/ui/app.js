@@ -41,6 +41,11 @@ const toolLabels = {
   node_neighbors: "همسایه‌های گره",
   find_paths: "یافتن مسیر",
   run_cypher: "کوئری Cypher",
+  notebook_index: "نقشهٔ دفترچه",
+  notebook_route: "مسیر پژوهش",
+  open_notebook: "صفحهٔ دفترچه",
+  list_tree: "فرزندان درخت",
+  walk_tree: "مسیر درخت",
 };
 const eventLabels = {
   started: "شروع پژوهش",

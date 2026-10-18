@@ -55,6 +55,9 @@ class ProviderConfig:
     timeout_seconds: float = 30.0
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     extra_headers: Mapping[str, str] = field(default_factory=dict, repr=False)
+    #: Consume the provider's SSE stream instead of one blocking response.
+    #: Keeps a slow generation from tripping the all-or-nothing timeout.
+    stream: bool = False
 
     def __post_init__(self) -> None:
         require_text(self.provider_id, "provider_id")

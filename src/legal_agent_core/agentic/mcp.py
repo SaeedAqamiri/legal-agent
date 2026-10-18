@@ -33,12 +33,14 @@ _ARG_PROPERTIES: dict[str, dict[str, Any]] = {
     "applicable_time": {"type": "string", "format": "date"},
     "provision_id": {"type": "string"},
     "provision_version_id": {"type": "string"},
+    "root_provision_id": {"type": "string"},
     "source_span_id": {"type": "string"},
     "document": {"type": "string"},
     "document_scope": {"type": "array", "items": {"type": "string"}},
     "instrument": {"type": "string"},
     "page_from": {"type": "integer", "minimum": 1},
     "page_to": {"type": "integer", "minimum": 1},
+    "offset": {"type": "integer", "minimum": 0},
     "cursor": {"type": "string"},
 }
 

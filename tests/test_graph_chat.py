@@ -603,6 +603,37 @@ class PlannerNativeToolTests(unittest.TestCase):
         self.assertEqual(turn.decision.tool, "search_laws")
         self.assertEqual(turn.decision.args, {"topic": "x"})
 
+    def test_excluded_tool_is_absent_from_next_provider_request(self) -> None:
+        from legal_agent_core.llm import ProviderResponse, TokenUsage
+
+        class Gateway:
+            request = None
+
+            def generate(self, provider, profile, request):
+                self.request = request
+                return ProviderResponse(
+                    "r-1", "m", '{"action":"abstain","reason":"بررسی شد"}',
+                    TokenUsage(1, 1, 2),
+                )
+
+        gateway = Gateway()
+        schemas = tuple(
+            {
+                "type": "function",
+                "function": {"name": name, "parameters": {"type": "object"}},
+            }
+            for name in ("search_provisions", "find_in_document")
+        )
+        self._planner(gateway, tools=schemas).decide(
+            "system",
+            "user",
+            excluded_tools=frozenset({"search_provisions"}),
+        )
+        self.assertEqual(
+            [item["function"]["name"] for item in gateway.request.tools],
+            ["find_in_document"],
+        )
+
     def test_bad_tool_arguments_surface_as_contract_error(self) -> None:
         from legal_agent_core.llm import ProviderResponse, TokenUsage, ToolCall
 

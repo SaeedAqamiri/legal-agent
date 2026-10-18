@@ -1,4 +1,4 @@
-"""Budgeted tool-driven research loop (ReAct over read-only legal tools).
+"""Tool-driven research loop (ReAct over read-only legal tools).
 
 Produces the same :class:`ResearchOutcome` as ``NavigationLoop`` so the
 application service, verifier and citation publish gate apply unchanged.
@@ -9,12 +9,17 @@ never invents completion it does not have.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
+import queue
+import re
+import threading
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
+from itertools import count
 from typing import Any
 
 from ..errors import DomainError
@@ -33,7 +38,7 @@ from ..verification import (
 from .envelope import RefStore, ToolStatus
 from .graph_tools import harvest_refs
 from .planner import PlannerTurn, ToolPlanner
-from .skill_router import augment_system_prompt, skills_index
+from .skill_router import augment_system_prompt
 from .tools import LegalResearchTools, ToolArgumentError
 
 _SYSTEM_TEMPLATE = """شما ایجنت پژوهش حقوقی فقط-خواندن روی مخزن canonical هستید.
@@ -55,7 +60,10 @@ _SYSTEM_TEMPLATE = """شما ایجنت پژوهش حقوقی فقط-خواند�
    فرقی ندارد (صفحه‌ی hit جست‌وجو گاهی درست‌تر از تکه‌ی خوانده‌شده است). اگر پاسخ در آن
    بخش نبود، به فهرست برگرد و بخشِ محتمل بعدی را امتحان کن — مثل کسی که فهرست کتاب را
    دوباره ورق می‌زند.
-۵. بهداشت کوئری: جست‌وجو فقط با ۲ تا ۴ کلیدواژه‌ی نهادی/حقوقی (نام مفاهیم، نه روایت).
+۵. انتخاب سند و بهداشت کوئری: اگر «جهت‌گیری اولیه» target_id سند یا ساختار سند داده است،
+   نخست همان شناسه را با get_document_structure/find_in_document به‌کار ببر. اگر نامزدها
+   نامرتبط یا ناکافی بودند، جست‌وجوی سراسری را به‌عنوان مسیر بازیابی انجام بده. جست‌وجو
+   فقط با ۲ تا ۴ کلیدواژه‌ی نهادی/حقوقی باشد (نام مفاهیم، نه روایت).
    اسم اشخاص، جملات محاوره‌ای و تاریخ‌های محاوره‌ای را در کوئری نیاور؛ اعداد را رقمی
    بنویس (۳۰ نه «سی»). نردبان: search کوتاه → find_in_document روی سند مشخص →
    list_documents برای جهت‌یابی → بازنویسی با مترادف حقوقی. اگر نتایج EMPTY/PARTIAL
@@ -65,15 +73,14 @@ _SYSTEM_TEMPLATE = """شما ایجنت پژوهش حقوقی فقط-خواند�
    جدا تحقیق کن و claim جدا با evidence خودش بساز. پیش از answer پوشش همه‌ی وجوه را
    کنترل کن؛ وجهِ بدون اثر را یا ادامه بده یا در متن پاسخ صریحاً «پوشش ناقص» اعلام کن —
    پاسخ قطعیِ ناقص ممنوع.
-۷. امتناع آخرین گزینه است و مشروط: پیش از {{"action":"abstain","reason":"..."}} باید
-   دست‌کم ۲ جست‌وجوی بازنویسی‌شده با واژه‌های متفاوت + یک find_in_document با واژه‌های
-   کلیدی + یک list_documents انجام داده باشی و در reason بگویی دقیقاً چه سند/داده‌ای
-   مفقود است. امتناع بدون این جست‌وجوها پذیرفته نیست. حدس و دانش بیرونی همیشه ممنوع است.
+۷. امتناع آخرین گزینه است: اگر راه معناداری برای بررسی شکاف شواهد باقی مانده،
+   همان را دنبال کن. پس از بررسی مسیرهای مرتبط، اگر هنوز سند لازم در مخزن یافت نشد،
+   با ذکر دقیق سند/دادهٔ مفقود abstain کن. حدس و دانش بیرونی همیشه ممنوع است.
    برای واقعه‌ی تاریخی (سال Y): با list_documents(applicable_time=تاریخ واقعه) کنترل کن
    آیا منبع هم‌دوره در مجموعه هست؛ نبودِ منبع هم‌دوره = امتناعِ مستند با همین استدلال.
 ۸. به‌محض پاسخ‌پذیر بودن پرسش، پاسخ نهایی بده؛ ادامه‌ی جست‌وجو پس از کفایت ممنوع.
    EMPTY پیاپی یعنی همان کوئری را تکرار نکن — سند یا واژگان حقوقی متفاوت امتحان کن.
-   بودجه: {budget_steps} فراخوانی ابزار/گام.
+   {budget_policy}
 ۹. لایه‌ی قضایی: وقتی قانون/ماده‌ی حاکم را یافتی و پرسش به اجرای عملی، تعارض آرا،
    یا اعتبار/ابطال مقرره مربوط است، با judgments_for_law روی همان قانون آرای وحدت
    رویه/دیوان و نظریات مشورتی مرتبط را ببین (یا با search_judgments موضوع را مستقیم
@@ -82,11 +89,15 @@ _SYSTEM_TEMPLATE = """شما ایجنت پژوهش حقوقی فقط-خواند�
    هیئت عمومی) را از متقاعدکننده (نظریه مشورتی/رویه‌ی قضایی) جدا کن.
    مهم: شناسهٔ گره‌های گراف، document_uid رأی و provision_id هرگز evidence_id نیستند؛
    فقط مقدار فیلد evidence_id در خروجی ابزارهای کانونیکال شاهد است. اگر رأی به ماده‌ی
-   X قانون Y استناد کرده (cited_laws)، همان ماده را با search_provisions پیدا کن و
-   evidence_id آن را شاهد قرار بده؛ خودِ رأی را فقط در متن پاسخ نام ببر.
-۱۰. ابزارهای موجود:
+    X قانون Y استناد کرده (cited_laws)، همان ماده را با search_provisions پیدا کن و
+    evidence_id آن را شاهد قرار بده؛ خودِ رأی را فقط در متن پاسخ نام ببر.
+ ۹.۵ ناوبری مفهومی: کنترل‌کننده پیش از نخستین تصمیم، درخت و در صورت وجود دفترچه را بررسی
+    و target_idهای قابل اقدام را در «جهت‌گیری اولیه» تزریق می‌کند. همان موضوع را
+    دوباره به walk_tree نده؛ اگر جست‌وجوی اولیه نامرتبط بود، یک مفهوم حقوقی دقیق‌تر
+    استخراج کن و با آن مسیر تازه‌ای بگیر. این لایه فقط راهنماست و هرگز شاهد نیست.
+ ۱۰. ابزارهای موجود:
 {tool_catalog}
-{skills_index}
+راهنمای لازم هر مرحله در متن «مرحلهٔ فعلی» آمده است؛ برای روند عادی ابزار skill را صدا نزن.
 
 ## قرارداد خروجی (الزامی) — دقیقاً یک شیء JSON:
 فراخوانی ابزار: {{"action":"tool","tool":"نام","args":{{...}},"thought":"..."}}
@@ -109,7 +120,9 @@ _CONTRACT_REMINDER = (
 
 #: Hard cap on one transcript step's rendered text (defence in depth: a tool
 #: payload gone wild must not eat the whole token budget by itself).
-MAX_STEP_TEXT = 6000
+MAX_STEP_TEXT = 4000
+MAX_EVIDENCE_MEMORY = 6
+MAX_EVIDENCE_EXCERPT = 600
 
 
 class IncompleteReason(StrEnum):
@@ -123,16 +136,22 @@ class IncompleteReason(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class AgenticConfig:
-    max_steps: int = 12
-    wall_seconds: float = 120.0
-    max_total_tokens: int = 60000
+    max_steps: int | None = None
+    # Emergency circuit breaker only. Normal routing follows evidence
+    # progress and changes course when a search repeats its earlier result.
+    wall_seconds: float = 900.0
+    max_total_tokens: int = 120000
     #: How many of the most recent transcript steps render in full; older ones
     #: collapse to one-line summaries (evidence ids preserved) so long research
     #: runs do not drown the planner in stale tool envelopes.
     recent_full_steps: int = 2
+    max_search_steps: int | None = None
+    max_tool_calls: int | None = None
+    answer_reserve_steps: int = 2
+    max_tool_seconds: float = 60.0
 
     def __post_init__(self) -> None:
-        if self.max_steps < 1:
+        if self.max_steps is not None and self.max_steps < 1:
             raise DomainError("max_steps must be positive")
         if self.wall_seconds <= 0:
             raise DomainError("wall_seconds must be positive")
@@ -140,6 +159,14 @@ class AgenticConfig:
             raise DomainError("max_total_tokens must be positive")
         if self.recent_full_steps < 0:
             raise DomainError("recent_full_steps cannot be negative")
+        if self.max_search_steps is not None and self.max_search_steps < 1:
+            raise DomainError("max_search_steps must be positive")
+        if self.max_tool_calls is not None and self.max_tool_calls < 1:
+            raise DomainError("max_tool_calls must be positive")
+        if self.answer_reserve_steps < 1:
+            raise DomainError("answer_reserve_steps must be positive")
+        if self.max_tool_seconds <= 0:
+            raise DomainError("max_tool_seconds must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +179,103 @@ class ToolCallTrace:
     error: str | None
     latency_ms: int
     evidence_count: int
+    #: Typed reason for the move (docs 06 §11): structure | citation |
+    #: statutory_basis | precedent | version | search | open | read | notebook
+    #: | graph | other. Lets a trace be read as a reasoned navigation path.
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PlannerCallTrace:
+    step: int
+    attempt: int
+    ok: bool
+    latency_ms: int
+    input_tokens: int = 0
+    output_tokens: int = 0
+    provider_id: str | None = None
+    model: str | None = None
+    action: str | None = None
+    error: str | None = None
+    tool: str | None = None
+
+
+#: Tool -> typed navigation reason. The point of a "lawyer-like" trace is that
+#: every hop says WHY it was taken (structure/citation/basis/...), not just which
+#: tool ran.
+_TOOL_REASON: dict[str, str] = {
+    "search_provisions": "search",
+    "aggregate_count": "search",
+    "find_in_document": "search",
+    "list_documents": "search",
+    "expand_search_terms": "search",
+    "semantic_search": "search",
+    "get_provision_version": "open",
+    "get_provision_text": "open",
+    "read_span": "read",
+    "get_version_history": "version",
+    "temporal_check": "version",
+    "get_references": "citation",
+    "get_related": "citation",
+    "node_neighbors": "citation",
+    "find_paths": "citation",
+    "get_statute_family": "statutory_basis",
+    "get_document_structure": "structure",
+    "list_document_contents": "structure",
+    "list_children": "structure",
+    "search_in_subtree": "search",
+    "list_tree": "structure",
+    "walk_tree": "structure",
+    "search_judgments": "precedent",
+    "judgments_for_law": "precedent",
+    "get_judgment_text": "precedent",
+    "notebook_index": "notebook",
+    "notebook_route": "notebook",
+    "open_notebook": "notebook",
+    "graph_stats": "graph",
+    "find_nodes": "graph",
+    "search_laws": "graph",
+    "list_provisions": "graph",
+    "run_cypher": "graph",
+}
+
+_BROAD_SEARCH_TOOLS = frozenset(
+    {
+        "search_provisions",
+        "semantic_search",
+        "expand_search_terms",
+        "list_documents",
+        "search_judgments",
+    }
+)
+
+# Atomic legal phrases lose their meaning when a small model paraphrases them
+# into a bag of generic words. Preserve phrases already present in the user's
+# question; this is query hygiene, not domain inference.
+_LEGAL_QUERY_ANCHORS = (
+    "مسئولیت محدود",
+    "مستثنیات دین",
+    "ضمانت نامه",
+    "سابقه غیرقطعی",
+    "سابقه قطعی",
+    "کارت هوشمند",
+    "دفترچه کار",
+    "تشخیص مطالبات",
+    "هیئت بدوی",
+    "بیمه بیکاری",
+    "آخرین قسط",
+    "پنج درصد",
+    "شخصیت حقوقی",
+    "حق بیمه",
+    "مدیرعامل",
+    "مفاصاحساب",
+    "وصول اجباری",
+    "سرقفلی",
+)
+
+
+def _tool_reason(tool: str) -> str:
+    return _TOOL_REASON.get(tool, "other")
 
 
 @dataclass(slots=True)
@@ -191,6 +315,7 @@ class _RunState:
     store: RefStore = field(default_factory=RefStore)
     steps: list[_StepRecord] = field(default_factory=list)
     trace: list[ToolCallTrace] = field(default_factory=list)
+    planner_trace: list[PlannerCallTrace] = field(default_factory=list)
     total_tokens: int = 0
     last_turn: PlannerTurn | None = None
     consecutive_empty: int = 0
@@ -203,6 +328,18 @@ class _RunState:
     doc_touch: dict[str, int] = field(default_factory=dict)
     structure_keys: set[str] = field(default_factory=set)
     nav_hinted: set[str] = field(default_factory=set)
+    #: Stable, model-visible evidence memory. It survives transcript compaction
+    #: and is keyed by canonical evidence_id rather than by prompt position.
+    evidence_memory: dict[str, dict[str, Any]] = field(default_factory=dict)
+    orientation_targets: list[dict[str, str]] = field(default_factory=list)
+    search_steps: int = 0
+    tool_calls: int = 0
+    last_search_signature: tuple[str, frozenset[str], tuple[str, ...]] | None = None
+    last_search_candidates: tuple[str, ...] = ()
+    last_search_evidence_ids: frozenset[str] | None = None
+    duplicate_blocks: int = 0
+    deadline_exceeded: bool = False
+    query_anchors: tuple[str, ...] = ()
 
 
 class ToolResearchLoop:
@@ -218,6 +355,7 @@ class ToolResearchLoop:
         self.verifier = verifier
         self.config = config or AgenticConfig()
         self.last_trace: tuple[ToolCallTrace, ...] = ()
+        self.last_planner_trace: tuple[PlannerCallTrace, ...] = ()
 
     def run(
         self,
@@ -244,17 +382,45 @@ class ToolResearchLoop:
         )
         ledger = EvidenceLedger()
         state = _RunState()
-        system_prompt = augment_system_prompt(self._system_prompt(), question)
+        state.query_anchors = _query_anchors(question)
+        self.last_trace = ()
+        self.last_planner_trace = ()
         deadline = time.monotonic() + self.config.wall_seconds
+        self._seed_orientation(state, question, applicable_time, progress, deadline)
+        system_prompt = augment_system_prompt(self._system_prompt(), question)
         draft: DraftAnswer | None = None
         report = None
         dispositions: set[tuple[str, EvidenceDisposition]] = set()
 
-        for step in range(1, self.config.max_steps + 1):
+        for step in count(1):
+            if self.config.max_steps is not None and step > self.config.max_steps:
+                break
+            if time.monotonic() >= deadline:
+                return self._incomplete(
+                    episode, ledger, state, draft, report, IncompleteReason.BUDGET_WALL, step - 1
+                )
             turn = self._call_planner(
-                system_prompt, question, applicable_time, state, episode, ledger
+                system_prompt,
+                question,
+                applicable_time,
+                state,
+                episode,
+                ledger,
+                deadline,
+                step,
+                progress,
             )
             if turn is None:
+                if state.deadline_exceeded:
+                    return self._incomplete(
+                        episode,
+                        ledger,
+                        state,
+                        draft,
+                        report,
+                        IncompleteReason.BUDGET_WALL,
+                        step,
+                    )
                 break
             state.last_turn = turn
             state.total_tokens += turn.input_tokens + turn.output_tokens
@@ -310,13 +476,25 @@ class ToolResearchLoop:
                     ledger,
                     progress,
                     thought=decision.thought,
+                    deadline=deadline,
                 )
+                if time.monotonic() >= deadline:
+                    return self._incomplete(
+                        episode,
+                        ledger,
+                        state,
+                        draft,
+                        report,
+                        IncompleteReason.BUDGET_WALL,
+                        step,
+                    )
                 if state.consecutive_empty >= 3 and state.consecutive_empty % 3 == 0:
                     state.steps.append(
                         _StepRecord(step, "dead_end_warning", _DEAD_END_WARNING)
                     )
                 if (
-                    self.config.max_steps - step == 2
+                    self.config.max_steps is not None
+                    and self.config.max_steps - step == self.config.answer_reserve_steps
                     and not any(item.kind == "budget_warning" for item in state.steps)
                 ):
                     state.steps.append(
@@ -332,6 +510,8 @@ class ToolResearchLoop:
                 episode.identified_issues.append(IncompleteReason.DECLARED_ABSTENTION.value)
                 report = self.verifier.verify(draft, ledger, applicable_time)
                 self._record_dispositions(episode, ledger, dispositions)
+                self.last_trace = tuple(state.trace)
+                self.last_planner_trace = tuple(state.planner_trace)
                 _emit(progress, {"type": "abstained", "step": step, "reason": decision.abstention_reason})
                 return ResearchOutcome(episode, ledger, draft, report, False, step)
             if decision.action == "answer":
@@ -347,38 +527,35 @@ class ToolResearchLoop:
                         )
                     )
                     continue
-                # Only evidence ids that actually entered the ledger can back a
-                # claim. Models routinely cite graph node ids (a judgment's
-                # document_uid) or stale ids; dropping those here and feeding
-                # the mistake back avoids a wasted verification-rejection loop.
+                # Unknown or unevidenced claims must be rewritten, not silently
+                # dropped: their prose may still remain in the answer body.
                 known_ids = {entry.evidence.evidence_id for entry in ledger.entries}
-                filtered: list[AnswerClaim] = []
                 unknown: set[str] = set()
                 for claim in claims:
-                    if not claim.evidence_ids:
-                        # No evidence at all: leave it for the unevidenced-claim
-                        # handling below (keeps the honest dropped-claims signal).
-                        filtered.append(claim)
-                        continue
-                    valid = tuple(eid for eid in claim.evidence_ids if eid in known_ids)
-                    unknown |= set(claim.evidence_ids) - set(valid)
-                    if valid:
-                        filtered.append(replace(claim, evidence_ids=valid))
-                if unknown and not filtered:
+                    unknown |= set(claim.evidence_ids) - known_ids
+                unevidenced = [claim.claim_id for claim in claims if not claim.evidence_ids]
+                if unknown or unevidenced:
+                    details: list[str] = []
+                    if unknown:
+                        details.append(
+                            "شناسه‌های ناشناخته: " + ", ".join(sorted(unknown)[:8])
+                        )
+                    if unevidenced:
+                        details.append(
+                            "claimهای بدون شاهد: " + ", ".join(unevidenced[:8])
+                        )
                     state.steps.append(
                         _StepRecord(
                             step,
                             "contract_error",
-                            "CONTRACT-ERROR: unknown evidence ids — این شناسه‌ها evidence_id "
-                            "معتبر نیستند (در دفتر شواهد نیستند): "
-                            + ", ".join(sorted(unknown)[:8])
+                            "CONTRACT-ERROR: پاسخ شامل claim نامعتبر است؛ متن پاسخ و claims "
+                            "را با هم بازنویسی کن و هیچ ادعای بدون شاهد را در متن باقی نگذار.\n"
+                            + "؛ ".join(details)
                             + "\nشناسهٔ گره‌های گراف، document_uid آرا و provision_id شاهد "
                             "نیستند؛ فقط مقدار فیلد evidence_id در خروجی ابزارهای کانونیکال "
-                            "(search_provisions/read_span/...) معتبر است. برای پرسش مبتنی بر رأی، "
-                            "مواد قانونی که رأی به آن‌ها استناد کرده (cited_laws) را با "
-                            "search_provisions پیدا کن و همان‌ها را شاهد قرار بده.\n"
+                            "معتبر است.\n"
                             + _CONTRACT_REMINDER,
-                            summary="CONTRACT-ERROR: unknown evidence ids",
+                            summary="CONTRACT-ERROR: claim ناشناخته یا بدون شاهد",
                         )
                     )
                     _emit(
@@ -386,29 +563,10 @@ class ToolResearchLoop:
                         {
                             "type": "contract_error",
                             "step": step,
-                            "message": "unknown evidence ids",
+                            "message": "unknown or missing evidence ids",
                         },
                     )
                     continue
-                if unknown:
-                    episode.identified_issues.append("dropped_unknown_evidence_ids")
-                claims = tuple(filtered)
-                # A claim without evidence can never be published, so drop it
-                # here instead of letting the publish gate crash the run. The
-                # dropped text stays in the answer body.
-                publishable = tuple(claim for claim in claims if claim.evidence_ids)
-                dropped = len(claims) - len(publishable)
-                if dropped:
-                    episode.identified_issues.append("dropped_unevidenced_claims")
-                    state.steps.append(
-                        _StepRecord(
-                            step,
-                            "dropped_claims",
-                            f"{dropped} ادعای بدون شاهد از فهرست claimها حذف شد.",
-                            summary=f"{dropped} ادعای بدون شاهد حذف شد.",
-                        )
-                    )
-                claims = publishable
                 level = decision.sufficiency_level
                 if level == "insufficient":
                     # Declared insufficiency routes to the honest incomplete
@@ -427,6 +585,8 @@ class ToolResearchLoop:
                     episode.identified_issues.append("sufficiency_insufficient")
                     report = self.verifier.verify(draft, ledger, applicable_time)
                     self._record_dispositions(episode, ledger, dispositions)
+                    self.last_trace = tuple(state.trace)
+                    self.last_planner_trace = tuple(state.planner_trace)
                     _emit(
                         progress,
                         {
@@ -462,6 +622,7 @@ class ToolResearchLoop:
                 episode.answer_id = draft.answer_id
                 if report.accepted:
                     self.last_trace = tuple(state.trace)
+                    self.last_planner_trace = tuple(state.planner_trace)
                     if level is not None:
                         # Record the accepted answer's self-assessment so the
                         # grader can score sufficiency agreement.
@@ -473,7 +634,7 @@ class ToolResearchLoop:
                         step,
                         "rejected",
                         "پاسخ راستی‌آزمایی نشد؛ issueها:\n"
-                        + "\n".join(f"- {issue.code.value}: {issue.message}" for issue in report.issues)
+                        + "\n".join(self._verification_issue_text(issue) for issue in report.issues)
                         + "\nبا ابزارها اثر موردنیاز را پیدا و باز کن، سپس پاسخ را بازنویسی کن.",
                         summary="پاسخ راستی‌آزمایی نشد: "
                         + ", ".join(issue.code.value for issue in report.issues),
@@ -485,7 +646,12 @@ class ToolResearchLoop:
                         "type": "verification_rejected",
                         "step": step,
                         "issues": [
-                            {"code": issue.code.value, "message": issue.message}
+                            {
+                                "code": issue.code.value,
+                                "message": issue.message,
+                                "evidence_id": issue.evidence_id,
+                                "target_id": issue.target_id,
+                            }
                             for issue in report.issues
                         ],
                     },
@@ -498,7 +664,8 @@ class ToolResearchLoop:
             else IncompleteReason.MAX_STEPS_WITHOUT_ANSWER
         )
         self.last_trace = tuple(state.trace)
-        return self._incomplete(episode, ledger, state, draft, report, reason, self.config.max_steps)
+        self.last_planner_trace = tuple(state.planner_trace)
+        return self._incomplete(episode, ledger, state, draft, report, reason, self.config.max_steps or step - 1)
 
     # ------------------------------------------------------------------ steps
 
@@ -512,13 +679,18 @@ class ToolResearchLoop:
         ledger: EvidenceLedger,
         progress: Callable[[dict], None] | None = None,
         thought: str | None = None,
+        deadline: float | None = None,
     ) -> None:
         started = time.monotonic()
+        if tool == "search_provisions":
+            args = self._preserve_query_anchor(args, state.query_anchors)
         key = (tool, json.dumps(args, ensure_ascii=False, sort_keys=True))
         cached = state.repeat_cache.get(key)
         if cached is not None:
-            # Deterministic tool + identical args = identical result. Replay it
-            # and tell the model plainly that repeating buys nothing.
+            state.duplicate_blocks += 1
+            # Re-render the cached payload. The original step may have been
+            # compacted, so a warning without content would make the requested
+            # evidence impossible for the planner to inspect.
             latency = int((time.monotonic() - started) * 1000)
             envelope = cached
             if envelope.status is ToolStatus.EMPTY:
@@ -529,47 +701,201 @@ class ToolResearchLoop:
                 ToolCallTrace(
                     step, tool, dict(args), True, envelope.status.value,
                     "repeat — identical call replayed from cache", latency,
-                    envelope.returned_count,
+                    envelope.returned_count, _tool_reason(tool),
                 )
             )
             state.steps.append(
                 _StepRecord(
                     step,
                     "repeat",
-                    f"فراخوانی تکراری {tool} با دقیقاً همین آرگومان‌ها — همان نتیجهٔ "
-                    f"پیشین برگشت (status {envelope.status.value}). تکرار بی‌فایده است: "
-                    "با evidence_idهای موجود answer بده، یا آرگومان/ابزار متفاوتی بزن.",
-                    summary=f"REPEAT {tool} — همان نتیجهٔ قبلی",
+                    f"REPLAY-CACHED {tool} {json.dumps(args, ensure_ascii=False, sort_keys=True)}\n"
+                    + json.dumps(envelope.to_payload(), ensure_ascii=False, sort_keys=True)
+                    + "\nاین نتیجه از کش بازپخش شد؛ فراخوانی دوبارهٔ همین ابزار و ورودی "
+                    "اطلاعات تازه نمی‌دهد. یک سند/ماده را باز کن یا مسیر جست‌وجو را عوض کن.",
+                    summary=self._tool_summary(tool, args, envelope) + " [cached]",
                 )
             )
             _emit(
                 progress,
                 {
-                    "type": "tool_call",
-                    "step": step,
-                    "tool": tool,
-                    "args": dict(args),
-                    "thought": thought,
-                    "ok": True,
-                    "status": envelope.status.value,
-                    "total_count": envelope.total_count,
-                    "returned_count": envelope.returned_count,
-                    "complete": envelope.complete,
-                    "latency_ms": latency,
-                    "evidence_count": 0,
-                    "cypher": envelope.meta.get("cypher"),
-                    "nodes": [],
-                    "edges": [],
-                    "repeat": True,
+                    "type": "tool_call", "step": step, "tool": tool,
+                    "args": dict(args), "thought": thought, "ok": True,
+                    "status": envelope.status.value, "total_count": envelope.total_count,
+                    "returned_count": envelope.returned_count, "complete": envelope.complete,
+                    "latency_ms": latency, "evidence_count": 0,
+                    "cypher": envelope.meta.get("cypher"), "nodes": [], "edges": [],
+                    "repeat": True, "reason": _tool_reason(tool),
                 },
             )
             return
+        signature = self._search_signature(tool, args) if tool in _BROAD_SEARCH_TOOLS else None
+        previous = state.last_search_signature
+        if (
+            signature is not None
+            and previous is not None
+            and signature[0] == previous[0]
+            and signature[2] == previous[2]
+            and signature[1]
+            and previous[1]
+            and len(signature[1] & previous[1]) / len(signature[1] | previous[1]) >= 0.75
+        ):
+            state.duplicate_blocks += 1
+            candidates = "؛ ".join(state.last_search_candidates) or "نامزد قابل اتکا ثبت نشد"
+            message = (
+                "NEAR-DUPLICATE-SEARCH: این کوئری از نظر واژگان و محدوده تقریباً "
+                "همان جست‌وجوی قبلی است و اجرا نشد. نامزدهای قبلی: "
+                f"{candidates}. اگر مرتبط‌اند سند/ماده را با find_in_document یا "
+                "get_document_structure بررسی کن؛ اگر نامرتبط‌اند مفهوم یا مسیر "
+                "را واقعاً عوض کن (مثلاً walk_tree، سند دیگر یا واژگان متفاوت)."
+            )
+            state.steps.append(_StepRecord(step, "search_pivot", message, summary=message))
+            state.trace.append(
+                ToolCallTrace(step, tool, dict(args), False, ToolStatus.ERROR.value,
+                              "near-duplicate broad search", 0, 0, _tool_reason(tool))
+            )
+            _emit(progress, {
+                "type": "tool_error", "step": step, "tool": tool,
+                "error": "near-duplicate broad search",
+            })
+            return
+        if self.config.max_tool_calls is not None and state.tool_calls >= self.config.max_tool_calls:
+            state.steps.append(
+                _StepRecord(
+                    step,
+                    "tool_budget",
+                    "TOOL-BUDGET-EXHAUSTED: سقف کل فراخوانی ابزار مصرف شده است. "
+                    "با شواهد موجود answer بده یا صریحاً abstain کن.",
+                    summary="TOOL-BUDGET-EXHAUSTED",
+                )
+            )
+            state.trace.append(
+                ToolCallTrace(
+                    step,
+                    tool,
+                    dict(args),
+                    False,
+                    ToolStatus.ERROR.value,
+                    "tool-call budget exhausted",
+                    0,
+                    0,
+                    _tool_reason(tool),
+                )
+            )
+            _emit(
+                progress,
+                {
+                    "type": "tool_error",
+                    "step": step,
+                    "tool": tool,
+                    "error": "tool-call budget exhausted",
+                },
+            )
+            return
+        if (
+            self.config.max_search_steps is not None
+            and state.search_steps >= self.config.max_search_steps
+        ):
+            state.steps.append(
+                _StepRecord(
+                    step,
+                    "search_budget",
+                    "SEARCH-BUDGET-EXHAUSTED: سقف جست‌وجوی سراسری مصرف شده است. "
+                    "ابزار دیگری اجرا نمی‌شود؛ با بستهٔ شواهد answer بده یا "
+                    "صریحاً abstain کن.",
+                    summary="SEARCH-BUDGET-EXHAUSTED",
+                )
+            )
+            state.trace.append(
+                ToolCallTrace(
+                    step,
+                    tool,
+                    dict(args),
+                    False,
+                    ToolStatus.ERROR.value,
+                    "broad search budget exhausted",
+                    0,
+                    0,
+                    _tool_reason(tool),
+                )
+            )
+            _emit(
+                progress,
+                {
+                    "type": "tool_error",
+                    "step": step,
+                    "tool": tool,
+                    "error": "broad search budget exhausted",
+                },
+            )
+            return
+        state.tool_calls += 1
+        if signature is not None:
+            state.last_search_signature = signature
+        else:
+            state.last_search_signature = None
+        state.duplicate_blocks = 0
+        # The budget limits attempts, not just successful result sets. A timed
+        # out or failing broad query still consumed a planner turn and database
+        # work; counting only successes lets a small model repeat the same slow
+        # search until the global wall-clock deadline.
+        if tool in _BROAD_SEARCH_TOOLS:
+            state.search_steps += 1
         try:
-            result = self.tools.dispatch(state.store, tool, args)
+            wall_remaining = (
+                max(0.0, deadline - time.monotonic())
+                if deadline is not None
+                else self.config.wall_seconds
+            )
+            remaining = min(wall_remaining, self.config.max_tool_seconds)
+            result = self._dispatch_tool_with_deadline(
+                state.store, tool, args, remaining
+            )
+            if result is None:
+                hit_wall = wall_remaining <= self.config.max_tool_seconds
+                state.deadline_exceeded = hit_wall
+                latency = int((time.monotonic() - started) * 1000)
+                message = (
+                    "research wall-clock deadline exceeded during tool call"
+                    if hit_wall
+                    else "per-tool time budget exceeded"
+                )
+                state.trace.append(
+                    ToolCallTrace(
+                        step,
+                        tool,
+                        dict(args),
+                        False,
+                        None,
+                        message,
+                        latency,
+                        0,
+                        _tool_reason(tool),
+                    )
+                )
+                state.steps.append(
+                    _StepRecord(
+                        step,
+                        "tool_error",
+                        f"مهلت کل پژوهش هنگام اجرای ابزار {tool} پایان یافت.",
+                        summary=f"TOOL-TIMEOUT {tool}",
+                    )
+                )
+                _emit(
+                    progress,
+                    {
+                        "type": "tool_error",
+                        "step": step,
+                        "tool": tool,
+                        "args": dict(args),
+                        "error": message,
+                        "latency_ms": latency,
+                    },
+                )
+                return
         except ToolArgumentError as exc:
             latency = int((time.monotonic() - started) * 1000)
             state.trace.append(
-                ToolCallTrace(step, tool, dict(args), False, None, str(exc), latency, 0)
+                ToolCallTrace(step, tool, dict(args), False, None, str(exc), latency, 0, _tool_reason(tool))
             )
             state.steps.append(
                 _StepRecord(
@@ -584,7 +910,7 @@ class ToolResearchLoop:
         except DomainError as exc:
             latency = int((time.monotonic() - started) * 1000)
             state.trace.append(
-                ToolCallTrace(step, tool, dict(args), False, None, str(exc), latency, 0)
+                ToolCallTrace(step, tool, dict(args), False, None, str(exc), latency, 0, _tool_reason(tool))
             )
             state.steps.append(
                 _StepRecord(
@@ -599,6 +925,29 @@ class ToolResearchLoop:
         latency = int((time.monotonic() - started) * 1000)
         envelope = result.envelope
         state.repeat_cache[key] = envelope
+        if signature is not None:
+            evidence_ids = frozenset(item.evidence_id for item in result.evidence)
+            previous_ids = state.last_search_evidence_ids
+            if (
+                previous is not None
+                and signature[0] == "search_provisions"
+                and previous[0] == signature[0]
+                and previous_ids is not None
+                and not evidence_ids - previous_ids
+            ):
+                # A different wording that returns the same evidence is still
+                # the same route. Restrict this search tool for the next turn,
+                # while keeping document reads and alternative routes open.
+                state.duplicate_blocks = 1
+            state.last_search_evidence_ids = evidence_ids
+            state.last_search_candidates = tuple(
+                dict.fromkeys(
+                    str(item.get("instrument_title") or item.get("title") or "")
+                    for item in envelope.items[:3]
+                    if isinstance(item, dict)
+                    and (item.get("instrument_title") or item.get("title"))
+                )
+            )
         nodes, edges = harvest_refs(tool, envelope, args)
         if envelope.status is ToolStatus.EMPTY:
             state.consecutive_empty += 1
@@ -614,6 +963,21 @@ class ToolResearchLoop:
                         {"step": step, "tool": tool},
                     )
                 )
+            # visited ids feed the notebook capture (docs 06 §7): provisions for
+            # canonical tools, graph node ids for the graph tools below.
+            if evidence.provision_id not in episode.visited_provisions:
+                episode.visited_provisions.append(evidence.provision_id)
+            if evidence.provision_id not in episode.visited_nodes:
+                episode.visited_nodes.append(evidence.provision_id)
+        # Results are ranked best-first. Insert the bounded slice in reverse so
+        # the dictionary's newest entries (the ones rendered after compaction)
+        # are the highest-ranked evidence, not the tail of a ten-hit page.
+        for evidence in reversed(result.evidence[:MAX_EVIDENCE_MEMORY]):
+            self._remember_evidence(state, evidence, tool)
+        for node in nodes:
+            node_id = node.get("id") if isinstance(node, dict) else None
+            if isinstance(node_id, str) and node_id and node_id not in episode.visited_nodes:
+                episode.visited_nodes.append(node_id)
         self._record_tool_action(episode, tool, args, step, envelope.status.value)
         state.trace.append(
             ToolCallTrace(
@@ -625,6 +989,7 @@ class ToolResearchLoop:
                 "; ".join(envelope.errors) or None,
                 latency,
                 len(result.evidence),
+                _tool_reason(tool),
             )
         )
         state.steps.append(
@@ -636,6 +1001,25 @@ class ToolResearchLoop:
                 summary=self._tool_summary(tool, args, envelope),
             )
         )
+        if signature is not None:
+            candidates = "؛ ".join(state.last_search_candidates) or "هیچ نامزد مشخصی"
+            novelty = (
+                "نتیجهٔ تازه‌ای نسبت به جست‌وجوی قبلی نداشت؛ روش یا سند را عوض کن. "
+                if state.duplicate_blocks else ""
+            )
+            state.steps.append(
+                _StepRecord(
+                    step,
+                    "search_assessment",
+                    f"بازبینی مسیر: جست‌وجوی اخیر status={envelope.status.value} "
+                    f"و {len(result.evidence)} شاهد داد. نامزدهای بالای فهرست: {candidates}. "
+                    + novelty
+                    + "مرتبط بودن نامزدها را با خود پرسش بسنج؛ اگر مرتبط‌اند به سند/ماده "
+                    "برو و متن را بررسی کن. اگر نامرتبط‌اند علت را مشخص کن و مسیر "
+                    "یا مفاهیم جست‌وجو را عوض کن. بازنویسی جزئی همین کوئری پیشرفت نیست.",
+                    summary=f"SEARCH-ASSESSMENT: {envelope.status.value}; candidates={candidates}",
+                )
+            )
         if nav_hint:
             state.steps.append(
                 _StepRecord(
@@ -663,8 +1047,41 @@ class ToolResearchLoop:
                 "cypher": envelope.meta.get("cypher"),
                 "nodes": nodes,
                 "edges": edges,
+                "reason": _tool_reason(tool),
             },
         )
+
+    def _dispatch_tool_with_deadline(
+        self,
+        store: RefStore,
+        tool: str,
+        args: dict[str, Any],
+        remaining: float,
+    ) -> Any | None:
+        """Bound every tool, including tools backed by another LLM/HTTP call."""
+
+        if remaining <= 0:
+            return None
+        result: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+        def invoke() -> None:
+            try:
+                result.put((True, self.tools.dispatch(store, tool, args)))
+            except Exception as exc:  # noqa: BLE001 - relay on caller thread
+                result.put((False, exc))
+
+        threading.Thread(
+            target=invoke,
+            daemon=True,
+            name=f"legal-agent-tool-{tool}",
+        ).start()
+        try:
+            ok, value = result.get(timeout=max(0.001, remaining))
+        except queue.Empty:
+            return None
+        if ok:
+            return value
+        raise value
 
     @staticmethod
     def _tool_summary(tool: str, args: dict, envelope: Any) -> str:
@@ -687,7 +1104,125 @@ class ToolResearchLoop:
         if len(evidence_ids) > 5:
             id_blob += "…"
         suffix = f" ev={id_blob}" if id_blob else ""
-        return f"TOOL {tool} {args_blob} → {envelope.status.value} ({coverage}){suffix}"
+        # Keep the actual text of read steps in the compacted history: once a
+        # step is older than recent_full_steps its full payload is dropped, and
+        # without the excerpt the model re-reads the same span again and again.
+        excerpt = ""
+        if tool in {"read_span", "get_provision_version", "get_provision_text"}:
+            for item in envelope.items:
+                if isinstance(item, dict) and item.get("text"):
+                    text = " ".join(str(item["text"]).split())[:240]
+                    excerpt = f" | متن: {text}"
+                    break
+        return f"TOOL {tool} {args_blob} → {envelope.status.value} ({coverage}){suffix}{excerpt}"
+
+    @classmethod
+    def _preserve_query_anchor(
+        cls, args: dict[str, Any], anchors: tuple[str, ...]
+    ) -> dict[str, Any]:
+        query = args.get("query")
+        if not isinstance(query, str) or not query.strip():
+            return args
+        folded_query = cls._fold(query)
+        missing = next(
+            (anchor for anchor in anchors if cls._fold(anchor) not in folded_query),
+            None,
+        )
+        if missing is None:
+            return args
+        anchored = dict(args)
+        anchored["query"] = f"{query.strip()} {missing}"
+        return anchored
+
+    @staticmethod
+    def _search_signature(
+        tool: str, args: dict[str, Any]
+    ) -> tuple[str, frozenset[str], tuple[str, ...]] | None:
+        query = args.get("query", args.get("topic"))
+        if not isinstance(query, str) or not query.strip():
+            return None
+        terms = frozenset(
+            re.findall(r"[\w\u0621-\u06cc]+", query.casefold().replace("\u200c", " "))
+        )
+        scope = args.get("document_scope") or ()
+        if isinstance(scope, str):
+            scope = (scope,)
+        return tool, terms, tuple(sorted(str(item) for item in scope))
+
+    @staticmethod
+    def _remember_evidence(state: _RunState, evidence: Any, tool: str) -> None:
+        """Keep a compact canonical excerpt independent of transcript steps."""
+        text = (evidence.text or "").strip()
+        state.evidence_memory.pop(evidence.evidence_id, None)
+        state.evidence_memory[evidence.evidence_id] = {
+            "evidence_id": evidence.evidence_id,
+            "document_id": evidence.document_id,
+            "provision_id": evidence.provision_id,
+            "source_span_id": evidence.source_span_id,
+            "page": evidence.page,
+            "retrieval_method": evidence.retrieval_method,
+            "seen_via": tool,
+            "text": text[:MAX_EVIDENCE_EXCERPT],
+            "truncated": len(text) > MAX_EVIDENCE_EXCERPT,
+        }
+
+    @staticmethod
+    def _evidence_memory(state: _RunState) -> str:
+        if not state.evidence_memory:
+            return "بستهٔ شواهد پایدار: خالی است."
+        rows = list(state.evidence_memory.values())[-MAX_EVIDENCE_MEMORY:]
+        return (
+            "بستهٔ شواهد پایدار (متن این بخش حتی پس از خلاصه‌سازی معتبر است):\n"
+            + json.dumps(rows, ensure_ascii=False, sort_keys=True)
+        )
+
+    def _stage_directive(self, state: _RunState) -> str:
+        if state.duplicate_blocks >= 2:
+            return (
+                "مرحلهٔ فعلی: مسیر فعلی پیشرفت نکرده است. ابزار یا سند دیگری را "
+                "با هدف مشخص انتخاب کن؛ جست‌وجوی تقریباً یکسان را تکرار نکن. "
+                "اگر هیچ مسیر معنادار دیگری نمانده، امتناع مستدل بده."
+            )
+        if not state.evidence_memory:
+            if state.orientation_targets:
+                has_strong = any(
+                    item.get("confidence") == "strong"
+                    for item in state.orientation_targets
+                )
+                if not has_strong:
+                    return (
+                        "مرحلهٔ فعلی: بازیابی سند. نامزدهای جهت‌گیری confidence=weak "
+                        "دارند؛ آن‌ها را سند منتخب فرض نکن. یک جست‌وجوی محدود با ۲ تا ۴ "
+                        "مفهوم حقوقی متمایز انجام بده و سپس داخل سند نتیجه پیمایش کن."
+                    )
+                return (
+                    "مرحلهٔ فعلی: انتخاب و بازکردن سند. از target_id/عنوان نامزدهای "
+                    "جهت‌گیری برای get_document_structure یا find_in_document استفاده کن. "
+                    "اگر نامزدها نامرتبط بودند، یک جست‌وجوی محدود بازیابی انجام بده."
+                )
+            return "مرحلهٔ فعلی: بازیابی سند مرتبط با یک کوئری کوتاه حقوقی."
+        if (
+            self.config.max_search_steps is not None
+            and state.search_steps >= self.config.max_search_steps
+        ):
+            return (
+                "مرحلهٔ فعلی: تکمیل و پاسخ. بودجهٔ جست‌وجو مصرف شده است؛ جست‌وجوی "
+                "یا ابزار دیگری نزن. متن شواهد پایدار را ارزیابی کن و همین حالا "
+                "answer یا abstain بده."
+            )
+        return (
+            "مرحلهٔ فعلی: ارزیابی کفایت شواهد. اگر متن موجود همهٔ وجوه را پوشش می‌دهد "
+            "answer بده؛ در غیر این صورت فقط شکاف مشخص بعدی را در همان سند هدف بگیر."
+        )
+
+    @staticmethod
+    def _verification_issue_text(issue: Any) -> str:
+        details = [f"code={issue.code.value}", issue.message]
+        if issue.evidence_id:
+            details.append(f"evidence_id={issue.evidence_id}")
+        if issue.target_id:
+            details.append(f"target_id={issue.target_id}")
+        return "- " + " | ".join(details)
 
     #: Tools whose successful hits mean "we are grinding inside one document".
     _NAV_TOOLS = frozenset(
@@ -772,6 +1307,9 @@ class ToolResearchLoop:
         state: _RunState,
         episode: ResearchEpisode,
         ledger: EvidenceLedger,
+        deadline: float,
+        step: int,
+        progress: Callable[[dict], None] | None,
     ) -> PlannerTurn | None:
         header = (
             f"پرسش: {question}\n"
@@ -788,7 +1326,7 @@ class ToolResearchLoop:
             ]
             notice = (
                 "(گام‌های قدیمی خلاصه شده‌اند؛ evidence_id و result_ref ذکرشده همچنان "
-                "معتبرند — برای متن کامل، read_span یا تکرار ابزار)\n"
+                "معتبرند؛ متن شواهد منتخب در بستهٔ پایدار پایین باقی مانده است.)\n"
                 if recent > 0
                 else ""
             )
@@ -797,19 +1335,120 @@ class ToolResearchLoop:
                     header,
                     "تاریخچه‌ی پژوهش تا این لحظه:\n" + notice,
                     *lines,
+                    self._stage_directive(state),
+                    self._evidence_memory(state),
                     self._evidence_nudge(ledger),
                 )
             )
         else:
-            transcript = f"{header}\n\nهیچ گامی انجام نشده؛ شروع کن."
+            transcript = "\n\n".join(
+                (header, "هیچ گامی انجام نشده؛ شروع کن.", self._stage_directive(state))
+            )
         last_error: DomainError | None = None
         for attempt in range(3):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                state.deadline_exceeded = True
+                return None
+            started = time.monotonic()
             try:
-                return self.planner.decide(system_prompt, transcript)
+                turn = self._planner_decide_with_deadline(
+                    system_prompt,
+                    transcript,
+                    remaining,
+                    excluded_tools=(
+                        frozenset({state.last_search_signature[0]})
+                        if state.duplicate_blocks
+                        and state.last_search_signature is not None
+                        else frozenset()
+                    ),
+                    force_answer=(
+                        (
+                            self.config.max_steps is not None
+                            and step >= self.config.max_steps
+                        )
+                        # Explicit evaluation caps remain optional. Normal
+                        # runs only force finalisation after a repeated,
+                        # unproductive route ignores the pivot feedback.
+                        or (
+                            self.config.max_search_steps is not None
+                            and state.search_steps >= self.config.max_search_steps
+                        )
+                        or (
+                            self.config.max_tool_calls is not None
+                            and state.tool_calls >= self.config.max_tool_calls
+                        )
+                        or state.duplicate_blocks >= 3
+                    ),
+                )
+                if turn is None:
+                    latency = int((time.monotonic() - started) * 1000)
+                    trace = PlannerCallTrace(
+                        step,
+                        attempt + 1,
+                        False,
+                        latency,
+                        error="research wall-clock deadline exceeded",
+                    )
+                    state.planner_trace.append(trace)
+                    _emit(progress, _planner_event(trace))
+                    state.deadline_exceeded = True
+                    return None
+                if time.monotonic() >= deadline:
+                    latency = int((time.monotonic() - started) * 1000)
+                    trace = PlannerCallTrace(
+                        step,
+                        attempt + 1,
+                        False,
+                        latency,
+                        provider_id=turn.provider_id,
+                        model=turn.model,
+                        error="research wall-clock deadline exceeded after response",
+                    )
+                    state.planner_trace.append(trace)
+                    _emit(progress, _planner_event(trace))
+                    state.deadline_exceeded = True
+                    return None
+                latency = int((time.monotonic() - started) * 1000)
+                trace = PlannerCallTrace(
+                    step,
+                    attempt + 1,
+                    True,
+                    latency,
+                    turn.input_tokens,
+                    turn.output_tokens,
+                    turn.provider_id,
+                    turn.model,
+                    turn.decision.action if turn.decision is not None else None,
+                    turn.contract_error,
+                    tool=(
+                        turn.decision.tool
+                        if turn.decision is not None
+                        and turn.decision.action == "tool"
+                        else None
+                    ),
+                )
+                state.planner_trace.append(trace)
+                _emit(progress, _planner_event(trace))
+                return turn
             except DomainError as exc:
                 last_error = exc
+                latency = int((time.monotonic() - started) * 1000)
+                trace = PlannerCallTrace(
+                    step,
+                    attempt + 1,
+                    False,
+                    latency,
+                    error=str(exc),
+                )
+                state.planner_trace.append(trace)
+                _emit(progress, _planner_event(trace))
                 if attempt < 2:
-                    time.sleep(0.5 * (attempt + 1))
+                    delay = min(0.5 * (attempt + 1), max(0.0, deadline - time.monotonic()))
+                    if delay <= 0:
+                        state.deadline_exceeded = True
+                        return None
+                    time.sleep(delay)
                     continue
         episode.identified_issues.append(IncompleteReason.LLM_ERROR.value)
         state.steps.append(
@@ -817,11 +1456,233 @@ class ToolResearchLoop:
         )
         return None
 
+    def _planner_decide_with_deadline(
+        self,
+        system_prompt: str,
+        transcript: str,
+        remaining: float,
+        *,
+        excluded_tools: frozenset[str] = frozenset(),
+        force_answer: bool = False,
+    ) -> PlannerTurn | None:
+        """Hard wall-clock guard around providers whose streams keep sockets alive.
+
+        The provider still receives the bounded socket timeout. The daemon
+        wrapper handles the harder case where continuous bytes prevent the HTTP
+        iterator from returning control before the research deadline.
+        """
+        result: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+        def invoke() -> None:
+            try:
+                bounded_decide = getattr(self.planner, "decide_with_timeout", None)
+                if callable(bounded_decide):
+                    kwargs: dict[str, Any] = {"timeout_seconds": remaining}
+                    parameters = inspect.signature(bounded_decide).parameters
+                    if force_answer and "force_answer" in parameters:
+                        kwargs["force_answer"] = True
+                    if excluded_tools and "excluded_tools" in parameters:
+                        kwargs["excluded_tools"] = excluded_tools
+                    value = bounded_decide(system_prompt, transcript, **kwargs)
+                else:
+                    kwargs = {}
+                    parameters = inspect.signature(self.planner.decide).parameters
+                    if force_answer and "force_answer" in parameters:
+                        kwargs["force_answer"] = True
+                    if excluded_tools and "excluded_tools" in parameters:
+                        kwargs["excluded_tools"] = excluded_tools
+                    value = self.planner.decide(system_prompt, transcript, **kwargs)
+                result.put((True, value))
+            except Exception as exc:  # noqa: BLE001 - relay on caller thread
+                result.put((False, exc))
+
+        threading.Thread(target=invoke, daemon=True, name="legal-agent-planner").start()
+        try:
+            ok, value = result.get(timeout=max(0.001, remaining))
+        except queue.Empty:
+            return None
+        if ok:
+            return value
+        raise value
+
+    def _seed_orientation(
+        self,
+        state: _RunState,
+        question: str,
+        applicable_time: Any,
+        progress: Any,
+        deadline: float,
+    ) -> None:
+        """Prepend a deterministic orientation map to the transcript.
+
+        Like OpenCode injecting notebook memory into context, this guarantees
+        the agent *sees* the conceptual tree and learned routes even if it would
+        otherwise jump straight to lexical search. Best-effort; never raises.
+        The agent is free to ignore it when it is not useful.
+        """
+        blocks: list[str] = []
+        walk = self._safe_tool(
+            state,
+            "walk_tree",
+            {"topic": question, "limit": 5},
+            timeout_seconds=min(1.0, max(0.001, deadline - time.monotonic())),
+        )
+        if walk is not None and walk.status is ToolStatus.OK and walk.items:
+            lines = []
+            for item in walk.items:
+                path = " / ".join(step.get("label") or "?" for step in item.get("path", []))
+                target_id = item.get("target_id")
+                target_label = item.get("target_label")
+                kind = item.get("kind")
+                confidence = item.get("route_confidence", "weak")
+                matched = ", ".join(item.get("matched_tokens") or [])
+                lines.append(
+                    f"- target_id={target_id} | kind={kind} | confidence={confidence} "
+                    f"| matched={matched or '-'} | title={target_label} | path={path}"
+                )
+                if isinstance(target_id, str) and isinstance(target_label, str):
+                    state.orientation_targets.append(
+                        {
+                            "target_id": target_id,
+                            "title": target_label,
+                            "kind": str(kind or ""),
+                            "confidence": str(confidence),
+                        }
+                    )
+            if lines:
+                blocks.append("مسیر(های) درخت مفهومی برای این موضوع:\n" + "\n".join(lines))
+            # Pre-open the best instrument outline. This turns the orientation
+            # from a prose suggestion into an actionable document route without
+            # spending another model decision.
+            first = state.orientation_targets[0] if state.orientation_targets else None
+            best = (
+                first
+                if first is not None
+                and first["kind"] == "instrument"
+                and first["confidence"] == "strong"
+                else None
+            )
+            if best is not None:
+                structure = self._safe_tool(
+                    state,
+                    "get_document_structure",
+                    {
+                        "document": best["target_id"],
+                        "applicable_time": applicable_time.isoformat(),
+                    },
+                    timeout_seconds=min(3.0, max(0.001, deadline - time.monotonic())),
+                )
+                if structure is not None and structure.status is ToolStatus.OK:
+                    blocks.append(
+                        "ساختار نامزد اول با شناسهٔ مستقیم:\n"
+                        + json.dumps(structure.to_payload(), ensure_ascii=False, sort_keys=True)
+                    )
+
+            # Notebook data is a navigation hint only. Open the best candidate
+            # deterministically so a small model need not spend a turn loading
+            # a skill/page before it can act on the route.
+            if best is not None:
+                notebook = self._safe_tool(
+                    state,
+                    "open_notebook",
+                    {"node_id": best["target_id"]},
+                    timeout_seconds=min(1.0, max(0.001, deadline - time.monotonic())),
+                )
+                if notebook is not None and notebook.status is ToolStatus.OK and notebook.items:
+                    blocks.append(
+                        "راهنمای دفترچه برای نامزد اول (فقط مسیر، نه شاهد):\n"
+                        + json.dumps(notebook.to_payload(), ensure_ascii=False, sort_keys=True)
+                    )
+        if blocks:
+            state.steps.append(
+                _StepRecord(
+                    0,
+                    "orientation",
+                    "## جهت‌گیری اولیه (نقشهٔ ناوبری)\n"
+                    + "\n\n".join(blocks)
+                    + "\n\nاگر یکی از این اسناد مربوط بود، مستقیم با "
+                    "`get_document_structure(document=\"<target_id>\")` بازش کن و با "
+                    "list_children/search_in_subtree داخلش پایین برو؛ سپس ادعا را با evidence "
+                    "مستند کن. اگر این نقشه به پرسش مربوط نبود، نادیده بگیر و مسیر معمول را ادامه بده.",
+                    summary="ORIENTATION: actionable tree targets + notebook hint",
+                )
+            )
+            _emit(progress, {"type": "orientation", "text": " | ".join(blocks)[:800]})
+
+    def _safe_tool(
+        self,
+        state: _RunState,
+        name: str,
+        args: dict[str, Any],
+        *,
+        timeout_seconds: float = 2.0,
+    ) -> Any:
+        available = getattr(self.tools, "spec_available", None)
+        if callable(available) and not available(name):
+            return None
+        result: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+        def invoke() -> None:
+            try:
+                # Orientation is advisory and never evidence; isolate its refs
+                # so a timed-out worker cannot mutate the live research store.
+                result.put((True, self.tools.dispatch(RefStore(), name, args).envelope))
+            except Exception as exc:  # noqa: BLE001 - relay below
+                result.put((False, exc))
+
+        threading.Thread(
+            target=invoke,
+            daemon=True,
+            name=f"legal-agent-orientation-{name}",
+        ).start()
+        try:
+            ok, value = result.get(timeout=max(0.001, timeout_seconds))
+        except queue.Empty:
+            return None
+        return value if ok else None
+
     def _system_prompt(self) -> str:
+        native_schemas = tuple(getattr(self.planner, "tools", ()))
+        native_names = frozenset(
+            str(schema.get("function", {}).get("name"))
+            for schema in native_schemas
+            if isinstance(schema, dict) and schema.get("function", {}).get("name")
+        )
+        compact_catalog = getattr(self.tools, "compact_tool_catalog", None)
+        catalog = (
+            compact_catalog(native_names)
+            if native_names and callable(compact_catalog)
+            else self.tools.tool_catalog()
+        )
         return _SYSTEM_TEMPLATE.format(
-            budget_steps=self.config.max_steps,
-            tool_catalog=self.tools.tool_catalog(),
-            skills_index=skills_index(),
+            budget_policy=(
+                "سقفِ پیکربندی‌شده: "
+                + ", ".join(
+                    item
+                    for item in (
+                        f"{self.config.max_search_steps} جست‌وجوی سراسری"
+                        if self.config.max_search_steps is not None else "",
+                        f"{self.config.max_tool_calls} فراخوانی ابزار"
+                        if self.config.max_tool_calls is not None else "",
+                        f"{self.config.max_steps} تصمیم مدل"
+                        if self.config.max_steps is not None else "",
+                    )
+                    if item
+                )
+                + "."
+                if any(
+                    value is not None
+                    for value in (
+                        self.config.max_search_steps,
+                        self.config.max_tool_calls,
+                        self.config.max_steps,
+                    )
+                )
+                else "تا زمانی که شواهد تازه یا مسیر معنادار پیدا می‌شود تحقیق را ادامه بده؛ "
+                "کوئری‌های تقریباً یکسان را تکرار نکن. پس از بررسی مسیرهای مرتبط، "
+                "پاسخ مستند یا امتناع مستدل بده."
+            ),
+            tool_catalog=catalog,
         )
 
     @staticmethod
@@ -846,6 +1707,10 @@ class ToolResearchLoop:
             "node_neighbors": ResearchActionType.FOLLOWED_REFERENCE,
             "find_paths": ResearchActionType.FOLLOWED_REFERENCE,
             "judgments_for_law": ResearchActionType.FOLLOWED_REFERENCE,
+            # notebook navigation tools (shortcut layer, never evidence)
+            "open_notebook": ResearchActionType.OPENED,
+            "notebook_route": ResearchActionType.FOLLOWED_REFERENCE,
+            "notebook_index": ResearchActionType.SEARCHED,
         }.get(tool, ResearchActionType.SEARCHED)
         target = (
             args.get("provision_version_id")
@@ -899,6 +1764,7 @@ class ToolResearchLoop:
         iterations: int,
     ) -> ResearchOutcome:
         self.last_trace = tuple(state.trace)
+        self.last_planner_trace = tuple(state.planner_trace)
         if reason.value not in episode.identified_issues:
             episode.identified_issues.append(reason.value)
         if draft is None:
@@ -934,6 +1800,32 @@ def _emit(progress: Callable[[dict], None] | None, event: dict) -> None:
         progress(event)
     except Exception:  # noqa: BLE001 — progress listeners must never break research
         return
+
+
+def _planner_event(trace: PlannerCallTrace) -> dict[str, Any]:
+    return {
+        "type": "planner_call",
+        "step": trace.step,
+        "attempt": trace.attempt,
+        "ok": trace.ok,
+        "latency_ms": trace.latency_ms,
+        "input_tokens": trace.input_tokens,
+        "output_tokens": trace.output_tokens,
+        "provider_id": trace.provider_id,
+        "model": trace.model,
+        "action": trace.action,
+        "tool": trace.tool,
+        "error": trace.error,
+    }
+
+
+def _query_anchors(question: str) -> tuple[str, ...]:
+    folded = question.casefold().replace("\u200c", "").replace("\u200f", "")
+    return tuple(
+        anchor
+        for anchor in _LEGAL_QUERY_ANCHORS
+        if anchor.casefold().replace("\u200c", "") in folded
+    )
 
 
 def _parse_claims(raw_claims: Sequence[dict]) -> tuple[AnswerClaim, ...]:

@@ -29,6 +29,14 @@ class JsonHttpResponse:
     body: object
 
 
+class LLMStreamHTTPError(Exception):
+    """Non-2xx status encountered while opening an SSE stream."""
+
+    def __init__(self, response: JsonHttpResponse) -> None:
+        super().__init__(f"stream HTTP {response.status_code}")
+        self.response = response
+
+
 class JsonHttpTransport(Protocol):
     def post(
         self,
@@ -85,6 +93,67 @@ class UrllibJsonTransport:
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise LLMResponseFormatError("LLM provider returned invalid JSON") from exc
 
+    def post_stream(
+        self,
+        url: str,
+        headers: Mapping[str, str],
+        payload: Mapping[str, Any],
+        timeout_seconds: float,
+    ) -> Any:
+        """Yield SSE ``data:`` payload strings from a streaming chat completion.
+
+        Reads the response line by line, but also enforces an absolute deadline.
+        Provider heartbeats must not keep one planner decision alive beyond the
+        agent's remaining wall-clock budget.
+        """
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={**dict(headers), "Accept": "text/event-stream"},
+            method="POST",
+        )
+        try:
+            response = urllib.request.urlopen(request, timeout=timeout_seconds)
+        except urllib.error.HTTPError as exc:
+            raw_body = exc.read()
+            try:
+                body = self._decode(raw_body)
+            except LLMResponseFormatError:
+                body = {}
+            raise LLMStreamHTTPError(
+                JsonHttpResponse(
+                    exc.code,
+                    dict(exc.headers.items()) if exc.headers else {},
+                    body,
+                )
+            ) from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise LLMTransportError("LLM provider connection failed") from exc
+
+        deadline = time.monotonic() + timeout_seconds
+
+        def _iter() -> Any:
+            try:
+                for raw_line in response:
+                    if time.monotonic() >= deadline:
+                        raise LLMTransportError(
+                            "LLM provider stream exceeded its absolute deadline"
+                        )
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    if data:
+                        yield data
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                raise LLMTransportError("LLM provider stream timed out") from exc
+            finally:
+                response.close()
+
+        return _iter()
+
 
 class OpenAICompatibleGateway:
     RETRYABLE_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504})
@@ -113,13 +182,35 @@ class OpenAICompatibleGateway:
         payload = self._payload(provider.endpoint_style, profile, request)
         policy = provider.retry_policy
 
+        streaming = (
+            provider.stream
+            and provider.endpoint_style == EndpointStyle.CHAT_COMPLETIONS
+            and hasattr(self.transport, "post_stream")
+        )
+        if streaming:
+            payload = {**payload, "stream": True, "stream_options": {"include_usage": True}}
+            return self._generate_streaming(provider, profile, url, headers, payload, policy)
+
+        deadline = time.monotonic() + provider.timeout_seconds
         for attempt in range(1, policy.max_attempts + 1):
+            remaining = (
+                provider.timeout_seconds
+                if attempt == 1
+                else deadline - time.monotonic()
+            )
+            if remaining <= 0:
+                raise LLMTransportError("LLM request exceeded its absolute deadline")
             try:
-                response = self.transport.post(url, headers, payload, provider.timeout_seconds)
+                response = self.transport.post(url, headers, payload, remaining)
             except LLMTransportError:
-                if attempt == policy.max_attempts:
+                if attempt == policy.max_attempts or time.monotonic() >= deadline:
                     raise
-                self.sleeper(self._backoff(policy.initial_backoff_seconds, policy.maximum_backoff_seconds, attempt))
+                delay = self._backoff(
+                    policy.initial_backoff_seconds,
+                    policy.maximum_backoff_seconds,
+                    attempt,
+                )
+                self.sleeper(min(delay, max(0.0, deadline - time.monotonic())))
                 continue
 
             if 200 <= response.status_code < 300:
@@ -131,9 +222,145 @@ class OpenAICompatibleGateway:
             delay = self._retry_after(response.headers)
             if delay is None:
                 delay = self._backoff(policy.initial_backoff_seconds, policy.maximum_backoff_seconds, attempt)
-            self.sleeper(min(delay, policy.maximum_backoff_seconds))
+            self.sleeper(
+                min(delay, policy.maximum_backoff_seconds, max(0.0, deadline - time.monotonic()))
+            )
 
         raise AssertionError("retry loop must return or raise")
+
+    def _generate_streaming(
+        self,
+        provider: ProviderConfig,
+        profile: ModelProfile,
+        url: str,
+        headers: Mapping[str, str],
+        payload: Mapping[str, Any],
+        policy: Any,
+    ) -> ProviderResponse:
+        deadline = time.monotonic() + provider.timeout_seconds
+        for attempt in range(1, policy.max_attempts + 1):
+            remaining = (
+                provider.timeout_seconds
+                if attempt == 1
+                else deadline - time.monotonic()
+            )
+            if remaining <= 0:
+                raise LLMTransportError("LLM stream exceeded its absolute deadline")
+            try:
+                text, tool_calls, usage, response_id, model = self._stream_chat(
+                    provider, url, headers, payload, timeout_seconds=remaining
+                )
+            except LLMStreamHTTPError as exc:
+                error = self._provider_error(exc.response, provider.api_key)
+                if (
+                    not error.retryable
+                    or attempt == policy.max_attempts
+                    or time.monotonic() >= deadline
+                ):
+                    raise error
+                delay = self._retry_after(exc.response.headers)
+                if delay is None:
+                    delay = self._backoff(
+                        policy.initial_backoff_seconds,
+                        policy.maximum_backoff_seconds,
+                        attempt,
+                    )
+                self.sleeper(
+                    min(
+                        delay,
+                        policy.maximum_backoff_seconds,
+                        max(0.0, deadline - time.monotonic()),
+                    )
+                )
+                continue
+            except LLMTransportError:
+                if attempt == policy.max_attempts or time.monotonic() >= deadline:
+                    raise
+                self.sleeper(
+                    min(
+                        self._backoff(
+                            policy.initial_backoff_seconds,
+                            policy.maximum_backoff_seconds,
+                            attempt,
+                        ),
+                        max(0.0, deadline - time.monotonic()),
+                    )
+                )
+                continue
+            if not text.strip() and not tool_calls:
+                raise LLMResponseFormatError("chat completion stream produced no text")
+            return ProviderResponse(
+                response_id=response_id or "stream-response",
+                model=model or profile.model,
+                text=text,
+                usage=usage or TokenUsage(),
+                tool_calls=tool_calls,
+            )
+        raise AssertionError("stream retry loop must return or raise")
+
+    def _stream_chat(
+        self,
+        provider: ProviderConfig,
+        url: str,
+        headers: Mapping[str, str],
+        payload: Mapping[str, Any],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> tuple[str, tuple[ToolCall, ...], TokenUsage | None, str | None, str | None]:
+        response_id: str | None = None
+        model: str | None = None
+        usage: TokenUsage | None = None
+        text_parts: list[str] = []
+        calls: dict[int, dict[str, str]] = {}
+        timeout = provider.timeout_seconds if timeout_seconds is None else timeout_seconds
+        for data in self.transport.post_stream(url, headers, payload, timeout):
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(chunk, Mapping):
+                continue
+            if response_id is None and isinstance(chunk.get("id"), str):
+                response_id = chunk["id"]
+            if model is None and isinstance(chunk.get("model"), str):
+                model = chunk["model"]
+            if isinstance(chunk.get("usage"), Mapping):
+                usage = self._usage(chunk["usage"], EndpointStyle.CHAT_COMPLETIONS)
+            choices = chunk.get("choices")
+            if not isinstance(choices, list):
+                continue
+            for choice in choices:
+                if not isinstance(choice, Mapping):
+                    continue
+                delta = choice.get("delta")
+                if not isinstance(delta, Mapping):
+                    continue
+                content = delta.get("content")
+                if isinstance(content, str):
+                    text_parts.append(content)
+                for tool_delta in delta.get("tool_calls") or []:
+                    if not isinstance(tool_delta, Mapping):
+                        continue
+                    index = tool_delta.get("index")
+                    index = index if isinstance(index, int) else 0
+                    slot = calls.setdefault(index, {"id": "", "name": "", "args": ""})
+                    call_id = tool_delta.get("id")
+                    if isinstance(call_id, str) and call_id:
+                        slot["id"] = call_id
+                    function = tool_delta.get("function")
+                    if isinstance(function, Mapping):
+                        name = function.get("name")
+                        if isinstance(name, str) and name:
+                            slot["name"] = name
+                        arguments = function.get("arguments")
+                        if isinstance(arguments, str):
+                            slot["args"] += arguments
+        tool_calls = tuple(
+            ToolCall(name=slot["name"], arguments=slot["args"] or "{}", id=slot["id"])
+            for _, slot in sorted(calls.items())
+            if slot["name"]
+        )
+        return "".join(text_parts), tool_calls, usage, response_id, model
 
     @staticmethod
     def _endpoint_url(provider: ProviderConfig) -> str:

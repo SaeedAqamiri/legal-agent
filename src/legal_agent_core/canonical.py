@@ -309,6 +309,30 @@ class ExplicitReference:
             raise DomainError("only resolved references may have a canonical target")
 
 
+class CanonicalEdgeClaim(StrEnum):
+    """What an edge CLAIMS — docs/qavanin/06_law_notebook.md §2.
+
+    A display heuristic (folder/derivation choice) must never silently become
+    a legal claim; consumers surface claim next to every edge.
+    """
+
+    STRUCTURE = "structure"
+    STATUTORY_BASIS = "statutory_basis"
+    CITATION = "citation"
+    AMENDMENT = "amendment"
+    SITE_RELATED = "site_related"
+    DISPLAY_HINT = "display_hint"
+
+
+class CanonicalEdgeReview(StrEnum):
+    """How an edge was validated — independent of its extraction method."""
+
+    UNREVIEWED = "unreviewed"
+    LLM_INFERRED = "llm_inferred"
+    CURATED = "curated"
+    INVALIDATED = "invalidated"
+
+
 @dataclass(frozen=True, slots=True)
 class CanonicalEdge:
     edge_id: str
@@ -318,6 +342,8 @@ class CanonicalEdge:
     provenance: Provenance
     source_span_id: str | None = None
     confidence: float | None = None
+    claim: CanonicalEdgeClaim | None = None
+    review_status: CanonicalEdgeReview | None = None
 
     def __post_init__(self) -> None:
         require_text(self.edge_id, "edge_id")

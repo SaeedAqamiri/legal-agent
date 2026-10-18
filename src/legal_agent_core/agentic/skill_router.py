@@ -67,6 +67,10 @@ _SKILL_DEFS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "administrative_annulment",
         ("ابطال", "باطل", "خارج از حدود اختیار", "مغایر قانون", "ابطلال"),
     ),
+    (
+        "notebook_navigation",
+        ("دفترچه", "از کجا شروع", "مسیر پژوهش", "کجا را بررسی", "ناوبری موضوع", "کوتاه‌ترین مسیر"),
+    ),
 )
 
 
@@ -90,14 +94,31 @@ def select_skill(question: str) -> Skill | None:
 
 
 def skills_index() -> str:
-    lines = ["مهارت‌های موجود (پیشنهاد رویه‌اند، نه الزام):"]
+    """Compact list of available skills (names + one-line description).
+
+    OpenCode-style: the model sees the whole catalog and loads a skill on
+    demand via the ``skill`` tool, instead of a keyword router injecting one.
+    """
+    lines = ["مهارت‌های موجود (راهنمای رویه‌اند؛ با ابزار skill بارگذاری کن):"]
     for skill in all_skills():
-        lines.append(f"- {skill.skill_id}")
+        description = ""
+        for line in skill.body.strip().splitlines():
+            text = line.strip().lstrip("#").strip()
+            if text and not text.startswith(("مهارت", "رویه")):
+                description = text
+                break
+        lines.append(f"- {skill.skill_id}: {description[:100]}")
     return "\n".join(lines)
 
 
+def load_skill(skill_id: str) -> str | None:
+    """Body of one skill, or None when the id is unknown."""
+    for skill in all_skills():
+        if skill.skill_id == skill_id:
+            return skill.render()
+    return None
+
+
 def augment_system_prompt(system_prompt: str, question: str) -> str:
-    skill = select_skill(question)
-    if skill is None:
-        return system_prompt
-    return f"{system_prompt}\n\n{skill.render()}"
+    """Kept for compatibility; skills are now loaded on demand via the tool."""
+    return system_prompt

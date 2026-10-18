@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -16,10 +17,12 @@ from uuid import uuid4
 from .answering import CitationPipeline, PublishedAnswer
 from .errors import ConflictError, DomainError, NotFoundError
 from .navigation import NavigationLoop, ResearchOutcome
+from .notebook import capture_events, derive_candidate_relations
 from .observability import MetricsRegistry
 from .research import Actor, ProgressiveRelation, TrustStatus
 from .security import AuthorizationService, Permission, Principal
 from .services import ProgressiveMemoryService
+from .verification import EvidenceDisposition
 
 
 class ResearchStrategy(StrEnum):
@@ -190,6 +193,9 @@ class ResearchApplicationService:
         metrics: MetricsRegistry,
         id_factory: Callable[[], str] | None = None,
         agentic: object | None = None,
+        notebook: object | None = None,
+        notebook_topic_resolver: Callable[[str], str | None] | None = None,
+        memory: ProgressiveMemoryService | None = None,
     ) -> None:
         self.navigation = navigation
         self.agentic = agentic
@@ -198,6 +204,9 @@ class ResearchApplicationService:
         self.authorization = authorization
         self.metrics = metrics
         self.id_factory = id_factory or (lambda: uuid4().hex)
+        self.notebook = notebook
+        self.notebook_topic_resolver = notebook_topic_resolver
+        self.memory = memory
 
     def run(self, principal: Principal, command: ResearchCommand) -> ResearchRecord:
         self.authorization.require(
@@ -252,6 +261,129 @@ class ResearchApplicationService:
                 (perf_counter() - started) * 1000,
                 organization_id=command.organization_id,
             )
+
+    def _capture_notebook(self, outcome: ResearchOutcome, organization_id: str) -> None:
+        """Record learned navigation from a finished episode (docs 06 §7).
+
+        Append-only events are always written; route weights are strengthened
+        ONLY for the nodes the accepted answer actually used (not every visited
+        node), and only when the episode produced a verified answer. Never
+        raises: notebook capture is best-effort.
+        """
+        if self.notebook is None:
+            return
+        try:
+            events = capture_events(outcome.episode, completed=outcome.completed)
+            self.notebook.save_events(events)
+            if not outcome.completed:
+                return
+            for node_id in self._effective_nodes(outcome):
+                topic_id = self._topic_for(node_id)
+                if not topic_id:
+                    continue
+                self.notebook.upsert_route(
+                    organization_id,
+                    topic_id,
+                    node_id,
+                    hit=True,
+                    confirmed=True,
+                    source_episode_id=outcome.episode.episode_id,
+                )
+            self._capture_relations(outcome, organization_id)
+        except Exception:  # capture is best-effort
+            logging.getLogger(__name__).warning("notebook capture failed", exc_info=True)
+
+    def _effective_nodes(self, outcome: ResearchOutcome) -> list[str]:
+        """Provisions the accepted answer relied on, plus their instruments."""
+        accepted = [
+            entry.evidence.provision_id
+            for entry in outcome.ledger.entries
+            if entry.disposition == EvidenceDisposition.ACCEPTED
+        ]
+        nodes: list[str] = []
+        for provision_id in dict.fromkeys(accepted):
+            nodes.append(provision_id)
+            instrument_id = self._instrument_of(provision_id)
+            if instrument_id:
+                nodes.append(instrument_id)
+        return list(dict.fromkeys(nodes))
+
+    def _instrument_of(self, provision_id: str) -> str | None:
+        canonical = getattr(self.citations, "canonical_repository", None)
+        if canonical is None:
+            return None
+        try:
+            return canonical.get_provision(provision_id).instrument_id
+        except Exception:  # noqa: BLE001 - unknown id is not fatal
+            return None
+
+    def _topic_for(self, node_id: str) -> str | None:
+        """Topic for a node; provisions are mapped through their instrument."""
+        if self.notebook_topic_resolver is None:
+            return "root"
+        topic = self.notebook_topic_resolver(node_id)
+        if topic and topic != "root":
+            return topic
+        instrument_id = self._instrument_of(node_id)
+        if instrument_id:
+            mapped = self.notebook_topic_resolver(instrument_id)
+            if mapped:
+                return mapped
+        return topic or "root"
+
+    def _capture_relations(self, outcome: ResearchOutcome, organization_id: str) -> None:
+        """Discover implicit relations between co-used provisions (docs 06 §7).
+
+        Provisions that one verified answer relied on together are
+        "commonly checked with" each other. Pairs already linked by a canonical
+        edge are skipped; the rest become reviewable ProgressiveRelation
+        candidates. Best-effort and bounded.
+        """
+        if self.memory is None:
+            return
+        accepted = [
+            entry.evidence.provision_id
+            for entry in outcome.ledger.entries
+            if entry.disposition == EvidenceDisposition.ACCEPTED
+        ]
+        if len(accepted) < 2:
+            return
+        candidates = derive_candidate_relations(outcome.episode, tuple(accepted))
+        if not candidates:
+            return
+        linked = self._linked_provision_pairs(accepted)
+        actor = Actor("notebook-capture", organization_id)
+        for candidate in candidates:
+            pair = frozenset((candidate.source_node_id, candidate.target_node_id))
+            if pair in linked:
+                continue
+            try:
+                self.memory.create_candidate(actor, candidate)
+            except Exception:  # noqa: BLE001 - one bad candidate must not abort
+                logging.getLogger(__name__).debug(
+                    "candidate relation skipped: %s", candidate.relation_id
+                )
+
+    def _linked_provision_pairs(self, provision_ids: list[str]) -> set[frozenset[str]]:
+        """Canonical-edge-linked pairs among the given provisions."""
+        canonical = getattr(self.citations, "canonical_repository", None)
+        if canonical is None:
+            return set()
+        wanted = set(provision_ids)
+        linked: set[frozenset[str]] = set()
+        try:
+            for provision_id in provision_ids:
+                for edge in canonical.edges_touching(provision_id):
+                    other = (
+                        edge.target_node_id
+                        if edge.source_node_id == provision_id
+                        else edge.source_node_id
+                    )
+                    if other in wanted:
+                        linked.add(frozenset((provision_id, other)))
+        except Exception:  # noqa: BLE001 - filtering is best-effort
+            return set()
+        return linked
 
     def get(
         self, principal: Principal, organization_id: str, episode_id: str
@@ -310,6 +442,7 @@ class ResearchApplicationService:
             except Exception as exc:  # noqa: BLE001 — streamed to the caller
                 events.put(("failed", str(exc)))
                 return
+            self._capture_notebook(outcome, command.organization_id)
             events.put(("outcome", outcome))
 
         thread = threading.Thread(target=worker, daemon=True)

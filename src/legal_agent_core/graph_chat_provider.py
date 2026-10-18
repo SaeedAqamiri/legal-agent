@@ -27,6 +27,7 @@ def _build_provider_config(cfg: LLMConfig) -> Any:
         cfg.base_url,
         EndpointStyle.CHAT_COMPLETIONS,
         api_key=cfg.api_key,
+        stream=True,
     )
 
 

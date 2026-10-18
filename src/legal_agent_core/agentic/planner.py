@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from ..llm import (
@@ -95,14 +95,72 @@ class LLMToolPlanner:
         user_prompt: str,
         *,
         force_answer: bool = False,
+        excluded_tools: frozenset[str] = frozenset(),
     ) -> PlannerTurn:
+        return self._decide_with_provider(
+            self.provider,
+            system_prompt,
+            user_prompt,
+            force_answer=force_answer,
+            excluded_tools=excluded_tools,
+        )
+
+    def decide_with_timeout(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        timeout_seconds: float,
+        force_answer: bool = False,
+        excluded_tools: frozenset[str] = frozenset(),
+    ) -> PlannerTurn:
+        """Run one decision without letting its socket timeout exceed the run budget."""
+        bounded = replace(
+            self.provider,
+            timeout_seconds=max(0.1, min(self.provider.timeout_seconds, timeout_seconds)),
+        )
+        return self._decide_with_provider(
+            bounded,
+            system_prompt,
+            user_prompt,
+            force_answer=force_answer,
+            excluded_tools=excluded_tools,
+        )
+
+    def _decide_with_provider(
+        self,
+        provider: ProviderConfig,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        force_answer: bool = False,
+        excluded_tools: frozenset[str] = frozenset(),
+    ) -> PlannerTurn:
+        if force_answer:
+            user_prompt = (
+                user_prompt
+                + "\n\nFINALIZATION-REQUIRED: پژوهش به مرحلهٔ جمع‌بندی رسیده است. هیچ ابزار "
+                "دیگری مجاز نیست. دقیقاً یک action=answer با claims مستند به "
+                "evidence_idهای موجود، یا action=abstain با ذکر شکاف شواهد صادر کن. "
+                "action=tool نامعتبر است."
+            )
         request = GenerationRequest(
             system_prompt,
             user_prompt,
-            tools=self.tools,
-            tool_choice="none" if force_answer else None,
+            # Some OpenAI-compatible GLM gateways ignore tool_choice="none".
+            # Omitting schemas makes finalisation enforceable at the protocol
+            # level instead of relying on provider compliance.
+            tools=(
+                ()
+                if force_answer
+                else tuple(
+                    schema for schema in self.tools
+                    if schema.get("function", {}).get("name") not in excluded_tools
+                )
+            ),
+            tool_choice=None,
         )
-        response = self.gateway.generate(self.provider, self.profile, request)
+        response = self.gateway.generate(provider, self.profile, request)
         if response.tool_calls:
             decision, contract_error = _decision_from_tool_calls(response.tool_calls)
         else:
@@ -115,7 +173,7 @@ class LLMToolPlanner:
             raw_text=response.text,
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
-            provider_id=self.provider.provider_id,
+            provider_id=provider.provider_id,
             model=response.model,
             model_profile_id=self.profile.profile_id,
             model_profile_version=self.profile.version,

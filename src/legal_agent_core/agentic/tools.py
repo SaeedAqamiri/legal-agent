@@ -7,6 +7,7 @@ Ordering is deterministic everywhere so identical questions page identically.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -14,7 +15,7 @@ from typing import Any
 from ..errors import DomainError, NotFoundError
 from ..repositories import CanonicalRepository, ResearchGraphRepository
 from ..research import Evidence
-from ..retrieval import search_tokens
+from ..retrieval import normalize_search_text, search_tokens
 from .envelope import Envelope, RefStore, ToolStatus, empty_envelope, make_envelope
 
 EXCERPT_CHARS = 280
@@ -28,6 +29,12 @@ MAX_SPAN_TEXT = 4000
 #: («ماده ۳۶۵ قانون مدنی»). Only then does the exact-number boost apply.
 _ARTICLE_REFERENCE_TOKENS = frozenset(
     {"ماده", "مادهٔ", "تبصره", "بند", "اصل", "فصل", "باب"}
+)
+
+_LEGAL_QUERY_EXPANSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("مسئولیت محدود", ("قروض", "تعهدات", "سرمایه", "شریک")),
+    ("توقیف اموال", ("بازداشت", "بدهکار")),
+    ("حق بیمه", ("تأمین اجتماعی", "کارفرما")),
 )
 
 
@@ -89,13 +96,23 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         "read_span",
-        "خواندن کامل یک تکه با صفحه‌ی دقیق؛ source_span_id یا evidence_id می‌پذیرد — برای cite از evidence_id برگشتی استفاده کنید",
-        ("source_span_id", "applicable_time"),
+        "خواندن یک بازه از تکه با صفحه‌ی دقیق؛ برای متن بلند offset=next_offset را ادامه بده؛ source_span_id یا evidence_id می‌پذیرد",
+        ("source_span_id", "applicable_time", "offset?"),
     ),
     ToolSpec(
         "list_document_contents",
         "فهرست مواد و بخش‌های یک سند با صفحه (فهرست محتوا)",
         ("document", "applicable_time"),
+    ),
+    ToolSpec(
+        "list_children",
+        "فرزندان مستقیم یک ماده/کانتینر (جلد/کتاب/باب/فصل) — برای پیمایش زیردرخت درون سند",
+        ("provision_id",),
+    ),
+    ToolSpec(
+        "search_in_subtree",
+        "جست‌وجوی متنی محدود به زیردرخت یک گره (مثلاً فقط داخل «فصل مهر») — وقتی بازهٔ صفحه کافی نیست",
+        ("root_provision_id", "query", "applicable_time", "cursor?"),
     ),
     ToolSpec(
         "get_document_structure",
@@ -165,6 +182,7 @@ class LegalResearchTools:
         semantic_index: Any | None = None,
         structure_summaries: Any | None = None,
         hidden_tools: frozenset[str] = frozenset(),
+        notebook_lookup: Any | None = None,
     ) -> None:
         if items_per_page < 1:
             raise DomainError("items_per_page must be positive")
@@ -177,6 +195,9 @@ class LegalResearchTools:
         #: produced offline by scripts/summarize_tree_nodes.py. Optional: the
         #: structure outline works with labels/titles alone.
         self.structure_summaries = structure_summaries
+        #: instrument_id -> notebook page summary (OpenCode-style auto-attach:
+        #: the learned note for a document is prepended when it is first read).
+        self.notebook_lookup = notebook_lookup
         #: evidence_id -> source_span_id, populated as tools build evidence so
         #: read_span can accept either identifier.
         self.evidence_index: dict[str, str] = {}
@@ -221,9 +242,29 @@ class LegalResearchTools:
         if allowed:
             raise ToolArgumentError(f"unexpected tool args: {', '.join(sorted(allowed))}")
 
+        folded_query = normalize_search_text(query)
+        expanded_terms = tuple(
+            term
+            for phrase, terms in _LEGAL_QUERY_EXPANSIONS
+            if normalize_search_text(phrase) in folded_query
+            for term in terms
+            if normalize_search_text(term) not in folded_query
+        )
+        retrieval_query = " ".join((query, *expanded_terms))
         query_tokens = search_tokens(query)
         if not query_tokens:
             raise ToolArgumentError("query must contain searchable text")
+        query_sequence = normalize_search_text(query).split()
+        query_phrases = tuple(
+            " ".join(query_sequence[start : start + size])
+            for size in (2, 3, 4)
+            for start in range(len(query_sequence) - size + 1)
+            if sum(
+                len(token) >= 3
+                for token in query_sequence[start : start + size]
+            )
+            >= 2
+        )
 
         scored: list[tuple[float, str]] = []
         versions: dict[str, tuple[Any, Any, Any]] = {}
@@ -231,7 +272,30 @@ class LegalResearchTools:
         scope_unresolved = set(scope)
         # FTS prefilter (OR semantics, advisory): bounds hydration on stores
         # with full-text support; exact scoring below is unchanged.
-        candidate_ids, prefiltered = self._candidate_version_ids(query, limit=512)
+        # Hydration below loads provision/document/instrument/span metadata for
+        # each candidate.  A 512-row prefilter caused thousands of small SQL
+        # round trips and let one broad search consume the whole agent wall.
+        # PostgreSQL FTS already ranks candidates, so a bounded top slice keeps
+        # interactive searches fast while the exact scorer below reranks them.
+        candidate_ids, prefiltered = self._candidate_version_ids(
+            retrieval_query, limit=64
+        )
+        if candidate_ids is not None:
+            # Guarantee a few candidates for each compound legal term. Broad
+            # FTS ranking can otherwise crowd the defining article out even
+            # though the exact phrase is present in it.
+            for phrase, _terms in _LEGAL_QUERY_EXPANSIONS:
+                normalized_phrase = normalize_search_text(phrase)
+                if normalized_phrase not in folded_query:
+                    continue
+                try:
+                    focused_ids, _ = self._candidate_version_ids(
+                        normalized_phrase, limit=16
+                    )
+                except Exception:  # noqa: BLE001 - advisory recall path
+                    focused_ids = None
+                if focused_ids:
+                    candidate_ids.update(focused_ids)
         version_rows = (
             self.canonical.list_provision_versions(sorted(candidate_ids))
             if candidate_ids is not None
@@ -260,8 +324,10 @@ class LegalResearchTools:
                 spans,
                 key=lambda item: len(search_tokens(item.raw_text) & query_tokens),
             )
-            lexical = _overlap(query_tokens, search_tokens(version.normalized_text))
-            lexical = max(lexical, _overlap(query_tokens, search_tokens(span.raw_text)))
+            version_tokens = search_tokens(version.normalized_text)
+            span_tokens = search_tokens(span.raw_text)
+            lexical = _overlap(query_tokens, version_tokens)
+            lexical = max(lexical, _overlap(query_tokens, span_tokens))
             metadata_text = " ".join(
                 filter(
                     None,
@@ -286,7 +352,36 @@ class LegalResearchTools:
             exact_number = (
                 references_article and bool(number_tokens) and number_tokens <= query_tokens
             )
-            score = 0.8 * lexical + 0.2 * metadata
+            # Some ingestion sources expose an entire PDF as one provision.
+            # Such a blob contains almost every common query term and used to
+            # outrank a precise article. Keep normal article-sized provisions
+            # untouched, but discount coarse whole-document matches.
+            candidate_token_count = max(
+                1, len(version_tokens), len(span_tokens)
+            )
+            granularity = min(
+                1.0, math.sqrt(250.0 / candidate_token_count)
+            )
+            score = 0.8 * lexical * granularity + 0.2 * metadata
+            if query_phrases:
+                normalized_candidate = normalize_search_text(
+                    f"{version.normalized_text} {metadata_text}"
+                )
+                phrase_hits = sum(
+                    phrase in normalized_candidate for phrase in query_phrases
+                )
+                score += min(0.45, 0.15 * phrase_hits) * granularity
+                candidate_tokens = search_tokens(normalized_candidate)
+                for phrase, terms in _LEGAL_QUERY_EXPANSIONS:
+                    if normalize_search_text(phrase) not in folded_query:
+                        continue
+                    if normalize_search_text(phrase) in normalized_candidate:
+                        score += 0.2 * granularity
+                    term_tokens = search_tokens(" ".join(terms))
+                    score += min(
+                        0.2,
+                        0.05 * len(term_tokens & candidate_tokens),
+                    ) * granularity
             if exact_number:
                 score += 1.0
             if score <= 0:
@@ -347,6 +442,8 @@ class LegalResearchTools:
 
         has_next = start + self.items_per_page < total
         meta: dict[str, Any] = {"query": query, "page": page, "referenced": referenced}
+        if expanded_terms:
+            meta["expanded_terms"] = list(expanded_terms)
         if prefiltered:
             meta["prefilter"] = "fts"
         if scope and scope_unresolved:
@@ -362,6 +459,152 @@ class LegalResearchTools:
             has_next_page=has_next,
             next_cursor=f"p{page + 1}" if has_next else None,
             meta=meta,
+        )
+        return ToolResult(envelope, tuple(evidence))
+
+    def _descendant_ids(self, root_provision_id: str) -> set[str]:
+        """All provision ids under (and including) a node, via parent links."""
+        children: dict[str, list[str]] = {}
+        for provision in self.canonical.list_provisions():
+            if provision.parent_provision_id:
+                children.setdefault(provision.parent_provision_id, []).append(
+                    provision.provision_id
+                )
+        seen: set[str] = set()
+        stack = [root_provision_id]
+        while stack:
+            node = stack.pop()
+            if node in seen:
+                continue
+            seen.add(node)
+            stack.extend(children.get(node, ()))
+        return seen
+
+    def _list_children(self, store: RefStore, args: dict[str, Any]) -> ToolResult:
+        """Direct children of a container/article (subtree descent)."""
+        provision_id = require_str(args, "provision_id")
+        if set(args) - {"provision_id"}:
+            raise ToolArgumentError("unexpected tool args")
+        try:
+            parent = self.canonical.get_provision(provision_id)
+        except NotFoundError:
+            return ToolResult(
+                empty_envelope(store, ToolStatus.NOT_FOUND, (f"unknown provision {provision_id!r}",))
+            )
+        children = [
+            p
+            for p in self.canonical.list_provisions()
+            if p.parent_provision_id == provision_id
+        ]
+        if not children:
+            return ToolResult(
+                empty_envelope(
+                    store,
+                    ToolStatus.EMPTY,
+                    meta={"provision_id": provision_id, "label": parent.label},
+                )
+            )
+        items = tuple(
+            {
+                "provision_id": p.provision_id,
+                "label": p.label,
+                "type": p.provision_type.value,
+                "title": p.title,
+                "ordinal": p.ordinal,
+                "summary": (
+                    self.structure_summaries.get(p.provision_id)
+                    if self.structure_summaries is not None
+                    else None
+                ),
+            }
+            for p in sorted(children, key=lambda p: (p.ordinal, p.provision_id))
+        )
+        envelope = make_envelope(
+            store,
+            items,
+            total_count=len(items),
+            meta={"provision_id": provision_id, "label": parent.label},
+        )
+        return ToolResult(envelope)
+
+    def _search_in_subtree(self, store: RefStore, args: dict[str, Any]) -> ToolResult:
+        """Lexical search restricted to one node's subtree (e.g. a chapter)."""
+        root_provision_id = require_str(args, "root_provision_id")
+        query = require_str(args, "query")
+        applicable_time = require_date(args, "applicable_time")
+        cursor = optional_cursor(args)
+        if set(args) - {"root_provision_id", "query", "applicable_time", "cursor"}:
+            raise ToolArgumentError("unexpected tool args")
+        query_tokens = search_tokens(query)
+        if not query_tokens:
+            raise ToolArgumentError("query must contain searchable text")
+        try:
+            self.canonical.get_provision(root_provision_id)
+        except NotFoundError:
+            return ToolResult(
+                empty_envelope(
+                    store, ToolStatus.NOT_FOUND, (f"unknown provision {root_provision_id!r}",)
+                )
+            )
+        descendants = self._descendant_ids(root_provision_id)
+        scored: list[tuple[float, Any, Any]] = []
+        for version in self.canonical.list_provision_versions():
+            if version.provision_id not in descendants:
+                continue
+            if not self._applicable(version, applicable_time):
+                continue
+            spans = self.canonical.source_spans_for_version(version.provision_version_id)
+            if not spans:
+                continue
+            span = max(
+                spans,
+                key=lambda item: len(search_tokens(item.raw_text) & query_tokens),
+            )
+            lexical = max(
+                _overlap(query_tokens, search_tokens(version.normalized_text)),
+                _overlap(query_tokens, search_tokens(span.raw_text)),
+            )
+            if lexical <= 0:
+                continue
+            scored.append((lexical, version, span))
+        scored.sort(key=lambda item: (-item[0], item[1].provision_version_id))
+        total = len(scored)
+        page = cursor or 1
+        start = (page - 1) * self.items_per_page
+        page_rows = scored[start : start + self.items_per_page]
+        if not page_rows:
+            return ToolResult(
+                empty_envelope(
+                    store,
+                    ToolStatus.EMPTY,
+                    meta={"root_provision_id": root_provision_id, "query": query, "total": total},
+                )
+            )
+        items: list[dict[str, Any]] = []
+        evidence: list[Evidence] = []
+        for _score, version, span in page_rows:
+            provision = self.canonical.get_provision(version.provision_id)
+            instrument = self.canonical.get_instrument(provision.instrument_id)
+            ev, aux_evidence, _aux_items = self._evidence_for_version(
+                version,
+                applicable_time,
+                method="subtree_search",
+                reason="subtree lexical match",
+                preferred_span=span,
+            )
+            evidence.append(ev)
+            evidence.extend(aux_evidence)
+            items.append(
+                self._compact_item(version, provision, instrument, span, ev, _score)
+            )
+        has_next = start + self.items_per_page < total
+        envelope = make_envelope(
+            store,
+            tuple(items),
+            total_count=total,
+            has_next_page=has_next,
+            next_cursor=f"p{page + 1}" if has_next else None,
+            meta={"root_provision_id": root_provision_id, "query": query, "page": page},
         )
         return ToolResult(envelope, tuple(evidence))
 
@@ -791,7 +1034,10 @@ class LegalResearchTools:
     def _read_span(self, store: RefStore, args: dict[str, Any]) -> ToolResult:
         source_span_id = require_str(args, "source_span_id")
         applicable_time = require_date(args, "applicable_time")
-        if set(args) - {"source_span_id", "applicable_time"}:
+        offset = optional_int(args, "offset") or 0
+        if offset < 0:
+            raise ToolArgumentError("offset cannot be negative")
+        if set(args) - {"source_span_id", "applicable_time", "offset"}:
             raise ToolArgumentError("unexpected tool args")
         span = None
         try:
@@ -838,6 +1084,17 @@ class LegalResearchTools:
                 reason="span read",
             )
             aux_evidence, aux_items = (), ()
+        if offset >= len(span.raw_text) and span.raw_text:
+            return ToolResult(
+                empty_envelope(
+                    store,
+                    ToolStatus.NOT_FOUND,
+                    (f"offset {offset} is beyond span length {len(span.raw_text)}",),
+                    meta={"source_span_id": span.source_span_id, "total_chars": len(span.raw_text)},
+                )
+            )
+        end_offset = min(offset + MAX_SPAN_TEXT, len(span.raw_text))
+        has_more = end_offset < len(span.raw_text)
         item = {
             "evidence_id": evidence.evidence_id,
             "source_span_id": span.source_span_id,
@@ -857,15 +1114,35 @@ class LegalResearchTools:
             # the planner payload only needs a bounded excerpt or one tool
             # step inflates the transcript by 100k chars and kills the
             # token budget.
-            "text": span.raw_text[:MAX_SPAN_TEXT],
-            "truncated": len(span.raw_text) > MAX_SPAN_TEXT,
+            "text": span.raw_text[offset:end_offset],
+            "text_offset": offset,
+            "next_offset": end_offset if has_more else None,
+            "has_more": has_more,
+            "truncated": has_more,
             "total_chars": len(span.raw_text),
             "cite_hint": (
                 f"اگر این تکه مبنای ادعاست، همین evidence_id را cite کن (صفحهٔ {span.page_number})"
             ),
         }
         envelope = make_envelope(
-            store, (item,), total_count=1, meta={"referenced": aux_items}
+            store,
+            (item,),
+            total_count=1,
+            has_next_page=has_more,
+            next_cursor=str(end_offset) if has_more else None,
+            complete=not has_more,
+            meta={
+                "referenced": aux_items,
+                "continuation_args": (
+                    {
+                        "source_span_id": span.source_span_id,
+                        "applicable_time": applicable_time.isoformat(),
+                        "offset": end_offset,
+                    }
+                    if has_more
+                    else None
+                ),
+            },
         )
         return ToolResult(
             envelope, tuple(e for e in (evidence, *aux_evidence) if e is not None)
@@ -1002,9 +1279,15 @@ class LegalResearchTools:
             versions = self.canonical.applicable_provision_versions(
                 provision.provision_id, applicable_time
             )
-            if not versions:
+            # containers (جلد/کتاب/باب/فصل) are structural and usually carry no
+            # text/version — keep them so the outline is not flattened.
+            if not versions and provision.provision_type.value not in {"part", "chapter"}:
                 continue
-            spans = self.canonical.source_spans_for_version(versions[0].provision_version_id)
+            spans = (
+                self.canonical.source_spans_for_version(versions[0].provision_version_id)
+                if versions
+                else ()
+            )
             pages = [span.page_number for span in spans if span.page_number is not None]
             summary = None
             if self.structure_summaries is not None:
@@ -1039,29 +1322,47 @@ class LegalResearchTools:
         total_parts = max(1, len(parts))
         page = min(max(cursor or 1, 1), total_parts)
         has_next = page < total_parts
+        meta: dict[str, Any] = {
+            "document": document,
+            "document_version_ids": sorted(allowed_versions),
+            "part": page,
+            "total_parts": total_parts,
+            "node_count": tree["node_count"],
+            "max_depth": max_depth,
+            "outline": parts[page - 1] if parts else "",
+            "hint": "نقشه‌ی سند: برچسب/عنوان + بازه‌ی صفحه. برای متن، read_span یا "
+            "list_document_contents را صدا بزنید؛ برای جست‌وجو در محدوده‌ی یک بخش، "
+            "search_in_subtree روی همان گره یا find_in_document با page_from/page_to.",
+            "next_steps": (
+                [f"بخش بعدی نقشه با cursor: p{page + 1}"] if has_next else []
+            ),
+        }
+        # OpenCode-style auto-attach: the learned notebook note for the document
+        # rides along the first time its structure is opened.
+        notebook_note = self._notebook_note(instruments)
+        if notebook_note:
+            meta["notebook"] = notebook_note
         envelope = make_envelope(
             store,
             (),
             total_count=tree["node_count"],
             has_next_page=has_next,
             next_cursor=f"p{page + 1}" if has_next else None,
-            meta={
-                "document": document,
-                "document_version_ids": sorted(allowed_versions),
-                "part": page,
-                "total_parts": total_parts,
-                "node_count": tree["node_count"],
-                "max_depth": max_depth,
-                "outline": parts[page - 1] if parts else "",
-                "hint": "نقشه‌ی سند: برچسب/عنوان + بازه‌ی صفحه. برای متن، read_span یا "
-                "list_document_contents را صدا بزنید؛ برای جست‌وجو در محدوده‌ی یک بخش، "
-                "find_in_document با page_from/page_to همان بازه.",
-                "next_steps": (
-                    [f"بخش بعدی نقشه با cursor: p{page + 1}"] if has_next else []
-                ),
-            },
+            meta=meta,
         )
         return ToolResult(envelope)
+
+    def _notebook_note(self, instrument_ids: list[str]) -> str | None:
+        if self.notebook_lookup is None:
+            return None
+        for instrument_id in instrument_ids:
+            try:
+                summary = self.notebook_lookup(instrument_id)
+            except Exception:  # noqa: BLE001 - attach is best-effort
+                summary = None
+            if summary:
+                return summary[:600]
+        return None
 
     def _get_statute_family(self, store: RefStore, args: dict[str, Any]) -> ToolResult:
         """Corpus-level orientation: the instrument's statutory forest neighborhood.
@@ -1113,6 +1414,10 @@ class LegalResearchTools:
                 "edge_type": edge.edge_type.value,
                 "direction": "outgoing" if outgoing else "incoming",
                 "confidence": edge.confidence,
+                "claim": edge.claim.value if edge.claim else None,
+                "review_status": (
+                    edge.review_status.value if edge.review_status else None
+                ),
             }
             if edge.edge_type.value == "implements":
                 if outgoing:
@@ -1147,6 +1452,8 @@ class LegalResearchTools:
                 "other_links": links,
                 "hint": "مبانی قانونی (statutory_bases) بالا دست‌اند — برای «حاکمیت» "
                 "از آن‌ها شروع کنید؛ instruments_implementing_it مشتقات این سندند. "
+                "claim هر یال را ببینید: statutory_basis یال حقوقیِ مستند است، "
+                "display_hint صرفاً حدس سازمان‌دهی است و استناد حقوقی نمی‌شود. "
                 "برای متن هر سند، get_document_structure یا search_provisions با "
                 "document_scope همان سند.",
             },
@@ -1519,7 +1826,39 @@ class LegalResearchTools:
     def _candidate_version_ids(self, query: str, limit: int) -> tuple[set[str] | None, bool]:
         """Full-text candidate set, or (None, False) when unsupported."""
         try:
-            ranks = self.canonical.fts_search(query, limit=limit)
+            # websearch_to_tsquery joins bare terms with AND.  This method is a
+            # recall-oriented prefilter for the graded scorer, so use explicit
+            # OR semantics: a provision matching «مسئولیت محدود» must not be
+            # excluded merely because it does not also contain «مدیرعامل».
+            tokens = sorted(search_tokens(query))
+            sequence = normalize_search_text(query).split()
+            phrases = [
+                f'"{" ".join(sequence[start : start + size])}"'
+                for size in (2, 3, 4)
+                for start in range(len(sequence) - size + 1)
+                if sum(
+                    len(token) >= 3
+                    for token in sequence[start : start + size]
+                )
+                >= 2
+            ]
+            # Keep phrase retrieval separate from the broad token query. In a
+            # single OR expression, thousands of documents matching generic
+            # tokens can crowd an exact phrase such as «مسئولیت محدود» out of
+            # the bounded top slice before the Python reranker sees it.
+            token_query = " OR ".join(tokens) if tokens else query
+            token_ranks = self.canonical.fts_search(token_query, limit=limit)
+            phrase_ranks = (
+                self.canonical.fts_search(
+                    " OR ".join(phrases), limit=min(32, limit)
+                )
+                if phrases
+                else {}
+            )
+            if token_ranks is None and phrase_ranks is None:
+                ranks = None
+            else:
+                ranks = {**(token_ranks or {}), **(phrase_ranks or {})}
         except Exception:  # noqa: BLE001 - prefilter must never break a tool
             return None, False
         if ranks is None:
