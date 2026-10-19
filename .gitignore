@@ -28,3 +28,6 @@ PageIndex/
 # Local data artifacts (db/falkordb dumps, corpus tarballs)
 legal-agent-data.tar.gz
 legal-agent-transfer/
+
+# Windows download metadata artifact
+*:Zone.Identifier

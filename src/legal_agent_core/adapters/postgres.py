@@ -714,6 +714,11 @@ class PostgresResearchHistoryStore:
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (organization_id, episode_id) DO UPDATE
                     SET payload = EXCLUDED.payload,
+                        conversation_id = EXCLUDED.conversation_id,
+                        user_id = EXCLUDED.user_id,
+                        question = EXCLUDED.question,
+                        applicable_time = EXCLUDED.applicable_time,
+                        created_at = EXCLUDED.created_at,
                         completed = EXCLUDED.completed,
                         iterations = EXCLUDED.iterations,
                         has_answer = EXCLUDED.has_answer

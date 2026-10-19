@@ -1051,6 +1051,27 @@ class LegalResearchTools:
                     span = self.canonical.get_source_span(resolved)
                 except NotFoundError:
                     span = None
+        if (
+            span is None
+            and source_span_id.startswith("prov_")
+            and not source_span_id.startswith("provv_")
+        ):
+            # Planners also hand a bare provision_id here (e.g. after a
+            # verifier "unfollowed explicit reference" hint). Resolve it to the
+            # applicable version's first span so the read can proceed.
+            try:
+                versions = self.canonical.applicable_provision_versions(
+                    source_span_id, applicable_time
+                )
+            except NotFoundError:
+                versions = ()
+            for version_candidate in versions:
+                spans = self.canonical.source_spans_for_version(
+                    version_candidate.provision_version_id
+                )
+                if spans:
+                    span = spans[0]
+                    break
         if span is None:
             hint = (
                 "این شناسه یک evidence_id ناشناخته است؛ source_span_id را از "

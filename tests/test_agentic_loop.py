@@ -909,18 +909,23 @@ class TranscriptCompactionTests(unittest.TestCase):
                 self._search("مهلت واخواهی"),
                 self._search("مهلت فرجام"),
                 self._search("مهلت مطالبه"),
+                PlannerDecision("abstain", abstention_reason="بودجه گام تمام شد"),
             ],
         )
         outcome = _run(_loop(self.repository, planner, max_steps=5))
         self.assertFalse(outcome.completed)  # never answered; budget burn run
-        # The LAST planner call (deciding step 5) saw 4 recorded steps:
-        # steps 1-2 compacted, steps 3-4 full.
+        # The LAST planner call is the forced-final grace turn (step 6); the
+        # grace record consumes the recent-full window, so envelope assertions
+        # target the step-5 deciding call (prompts[-2]): steps 1-2 compacted,
+        # steps 3-4 full there.
         final_prompt = planner.prompts[-1][1]
-        self.assertIn("گام‌های قدیمی خلاصه شده‌اند", final_prompt)
-        self.assertIn("TOOL search_provisions", final_prompt)
-        self.assertIn("ev=ev-", final_prompt)
-        self.assertNotIn('"result_ref": "r1"', final_prompt)  # old envelope gone
-        self.assertIn('"result_ref": "r4"', final_prompt)  # recent envelope kept
+        self.assertIn("گام پایانی", final_prompt)
+        step5_prompt = planner.prompts[-2][1]
+        self.assertIn("گام‌های قدیمی خلاصه شده‌اند", step5_prompt)
+        self.assertIn("TOOL search_provisions", step5_prompt)
+        self.assertIn("ev=ev-", step5_prompt)
+        self.assertNotIn('"result_ref": "r1"', step5_prompt)  # old envelope gone
+        self.assertIn('"result_ref": "r4"', step5_prompt)  # recent envelope kept
         self.assertIn("بستهٔ شواهد پایدار", final_prompt)
         self.assertIn("مهلت درخواست تجدیدنظر", final_prompt)
 
@@ -1015,6 +1020,7 @@ class DeadEndGuardTests(unittest.TestCase):
                 )
                 for query in ("مهلت", "اعتراض", "تجدیدنظر", "واخواهی")
             ]
+            + [PlannerDecision("abstain", abstention_reason="بودجه تمام شد")]
         )
         loop = _loop(repository, planner, max_steps=4, max_search_steps=2)
         outcome = _run(loop)

@@ -10,8 +10,11 @@ import re
 from pathlib import Path
 
 SOURCES = [
-    ("out/q_all20_v2.log", {
-        "SS-01", "SS-02", "SS-03", "SS-04", "SS-05", "SS-06", "SS-07", "SS-08", "SS-09", "SS-10",
+    ("out/q_SS-01.log", {"SS-01"}),
+    ("out/q_SS-02.log", {"SS-02"}),
+    ("out/q_SS-03.log", {"SS-03"}),
+    ("out/q_rest17.log", {
+        "SS-04", "SS-05", "SS-06", "SS-07", "SS-08", "SS-09", "SS-10",
         "SP-01", "SP-02", "SP-03", "SP-04", "SP-05", "SP-06", "SP-07", "SP-08", "SP-09", "SP-10",
     }),
 ]
@@ -32,7 +35,7 @@ ORIENT = re.compile(r"^\[جهت‌گیری اولیه\] (.*)$")
 
 def parse(path: str) -> dict[str, dict]:
     text = Path(path).read_text(encoding="utf-8", errors="replace")
-    blocks = re.split(r"^### ([A-Z]{2}-\d+): ", text, flags=re.M)
+    blocks = re.split(r"^### ([A-Z]{2}-\d+): ", text, flags=re.MULTILINE)
     out: dict[str, dict] = {}
     for i in range(1, len(blocks), 2):
         qid, body = blocks[i], blocks[i + 1]

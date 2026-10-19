@@ -302,6 +302,14 @@ _BUDGET_WARNING = (
     "یا اگر ادله واقعاً کافی نیست، امتناع مستدل با ذکر دقیق مفقود."
 )
 
+_FINAL_WARNING = (
+    "گام پایانی: بودجهٔ پژوهش تمام شده است و هنوز پاسخی نداده‌ای. "
+    "این گام فقط answer یا abstain می‌پذیرد؛ فراخوانی ابزار دیگر اجرا نمی‌شود. "
+    "از بهترین شواهد همین تاریخچه پاسخ مستند بساز (سطح sufficiency=partial با ذکر "
+    "gaps اگر پوشش کامل نیست) و اگر واقعاً هیچ وجه قابل‌پاسخی مستند نشده، امتناع "
+    "مستدل با فهرست دقیق مفقود بده."
+)
+
 _DEAD_END_WARNING = (
     "هشدار بن‌بست: سه جست‌وجوی پیاپی بدون نتیجه انجام شده است. همین کوئری را با "
     "چند واژه‌ی متفاوت تکرار نکن؛ یکی از این مسیرها: (۱) سند/فصل دیگری امتحان کن، "
@@ -337,6 +345,13 @@ class _RunState:
     last_search_signature: tuple[str, frozenset[str], tuple[str, ...]] | None = None
     last_search_candidates: tuple[str, ...] = ()
     last_search_evidence_ids: frozenset[str] | None = None
+    #: One grace turn past the configured budget, granted only when the run is
+    #: about to die with evidence in hand but no answer ever attempted. The
+    #: forced-final demand makes the planner publish *something* verified
+    #: (answer with gaps, or a reasoned abstain) instead of a bare tool call.
+    final_forced: bool = False
+    #: True once the planner produced an answer or abstain decision this run.
+    answer_attempted: bool = False
     duplicate_blocks: int = 0
     deadline_exceeded: bool = False
     query_anchors: tuple[str, ...] = ()
@@ -356,6 +371,23 @@ class ToolResearchLoop:
         self.config = config or AgenticConfig()
         self.last_trace: tuple[ToolCallTrace, ...] = ()
         self.last_planner_trace: tuple[PlannerCallTrace, ...] = ()
+
+    def _final_turn_due(self, state: _RunState, ledger: EvidenceLedger, deadline: float) -> bool:
+        """A single grace turn is granted when the run would otherwise end
+        with evidence in the ledger but no answer/abstain ever attempted."""
+        return (
+            not state.final_forced
+            and not state.answer_attempted
+            and bool(ledger.entries)
+            and (deadline - time.monotonic()) > 90.0
+        )
+
+    def _begin_final_turn(self, state: _RunState, step: int) -> None:
+        state.final_forced = True
+        state.steps.append(_StepRecord(step, "final_demand", _FINAL_WARNING))
+        # The demand must sit at the end of the rendered transcript; steps are
+        # rendered in insertion order, so nothing else is appended after this
+        # before the planner call.
 
     def run(
         self,
@@ -394,7 +426,10 @@ class ToolResearchLoop:
 
         for step in count(1):
             if self.config.max_steps is not None and step > self.config.max_steps:
-                break
+                if self._final_turn_due(state, ledger, deadline):
+                    self._begin_final_turn(state, step)
+                else:
+                    break
             if time.monotonic() >= deadline:
                 return self._incomplete(
                     episode, ledger, state, draft, report, IncompleteReason.BUDGET_WALL, step - 1
@@ -425,15 +460,18 @@ class ToolResearchLoop:
             state.last_turn = turn
             state.total_tokens += turn.input_tokens + turn.output_tokens
             if state.total_tokens > self.config.max_total_tokens:
-                return self._incomplete(
-                    episode,
-                    ledger,
-                    state,
-                    draft,
-                    report,
-                    IncompleteReason.BUDGET_TOKENS,
-                    step,
-                )
+                if self._final_turn_due(state, ledger, deadline):
+                    self._begin_final_turn(state, step)
+                else:
+                    return self._incomplete(
+                        episode,
+                        ledger,
+                        state,
+                        draft,
+                        report,
+                        IncompleteReason.BUDGET_TOKENS,
+                        step,
+                    )
             if time.monotonic() > deadline:
                 return self._incomplete(
                     episode, ledger, state, draft, report, IncompleteReason.BUDGET_WALL, step
@@ -467,6 +505,20 @@ class ToolResearchLoop:
 
             decision = turn.decision
             if decision.action == "tool":
+                if state.final_forced:
+                    # The grace turn strips tool schemas planner-side and
+                    # demands finalization; a tool decision here (text-JSON
+                    # path) must not execute, or the demand is meaningless.
+                    state.steps.append(
+                        _StepRecord(
+                            step,
+                            "contract_error",
+                            "این گام پایانی بود؛ فراخوانی ابزار اجرا نمی‌شود. "
+                            "فقط action=answer (با claims مستند) یا action=abstain.",
+                            summary="FINAL-DEMAND-IGNORED: tool در گام پایانی",
+                        )
+                    )
+                    continue
                 self._run_tool_step(
                     decision.tool or "",
                     decision.args or {},
@@ -479,15 +531,18 @@ class ToolResearchLoop:
                     deadline=deadline,
                 )
                 if time.monotonic() >= deadline:
-                    return self._incomplete(
-                        episode,
-                        ledger,
-                        state,
-                        draft,
-                        report,
-                        IncompleteReason.BUDGET_WALL,
-                        step,
-                    )
+                    if self._final_turn_due(state, ledger, deadline):
+                        self._begin_final_turn(state, step)
+                    else:
+                        return self._incomplete(
+                            episode,
+                            ledger,
+                            state,
+                            draft,
+                            report,
+                            IncompleteReason.BUDGET_WALL,
+                            step,
+                        )
                 if state.consecutive_empty >= 3 and state.consecutive_empty % 3 == 0:
                     state.steps.append(
                         _StepRecord(step, "dead_end_warning", _DEAD_END_WARNING)
@@ -502,6 +557,7 @@ class ToolResearchLoop:
                     )
                 continue
             if decision.action == "abstain":
+                state.answer_attempted = True
                 draft = DraftAnswer(
                     f"answer-{hashlib.sha256(f'{episode_id}|abstain|{step}'.encode()).hexdigest()[:24]}",
                     f"پاسخ صادر نشد — امتناع صریح: {decision.abstention_reason}",
@@ -527,6 +583,7 @@ class ToolResearchLoop:
                         )
                     )
                     continue
+                state.answer_attempted = True
                 # Unknown or unevidenced claims must be rewritten, not silently
                 # dropped: their prose may still remain in the answer body.
                 known_ids = {entry.evidence.evidence_id for entry in ledger.entries}
@@ -640,6 +697,71 @@ class ToolResearchLoop:
                         + ", ".join(issue.code.value for issue in report.issues),
                     )
                 )
+                unfollowed = [
+                    issue
+                    for issue in report.issues
+                    if issue.code.value == "unfollowed_explicit_reference" and issue.target_id
+                ]
+                if unfollowed:
+                    # Open the referenced provision system-side instead of
+                    # bouncing the request through the model: every earlier
+                    # episode burned 5+ planner turns re-deriving what a single
+                    # read_span does deterministically.
+                    opened_ids: list[str] = []
+                    known_provisions = {
+                        entry.evidence.provision_id for entry in ledger.entries
+                    }
+                    for issue in unfollowed[:2]:
+                        target = issue.target_id
+                        if target in known_provisions:
+                            continue
+                        self._run_tool_step(
+                            "read_span",
+                            {"source_span_id": target, "applicable_time": applicable_time},
+                            step,
+                            state,
+                            episode,
+                            ledger,
+                            progress,
+                            thought="بازکردن سیستمی ارجاع صریح دنبال‌نشده",
+                            deadline=deadline,
+                        )
+                        opened = [
+                            item.evidence_id
+                            for item in ledger.entries
+                            if item.evidence.provision_id == target
+                        ]
+                        if opened:
+                            opened_ids.append(opened[-1])
+                    if opened_ids:
+                        state.steps.append(
+                            _StepRecord(
+                                step,
+                                "ref_hint",
+                                "ارجاع صریح دنبال‌نشده به‌صورت سیستمی باز شد؛ شاهد(های) تازه: "
+                                + ", ".join(opened_ids)
+                                + "\nدر بازنویسی پاسخ به همین evidence_idها استناد کن "
+                                "(نه به provision_id) و در متن به مادهٔ ارجاع‌شده هم اشاره کن.",
+                                summary="REF-OPENED: " + ", ".join(opened_ids),
+                            )
+                        )
+                    else:
+                        ids = ", ".join(
+                            dict.fromkeys(issue.target_id for issue in unfollowed)
+                        )
+                        state.steps.append(
+                            _StepRecord(
+                                step,
+                                "ref_hint",
+                                f"ارجاع صریح دنبال‌نشده برای این ماده(ها): {ids}\n"
+                                "برای برطرف‌کردن، همان ماده را با "
+                                '`get_related(provision_id="<id>", applicable_time=...)` '
+                                "یا `read_span(source_span_id=\"<id>\", applicable_time=...)` "
+                                "(اکنون شناسهٔ ماده را هم می‌پذیرد) باز کن و شاهدش را در claim "
+                                "استناد بده — نه شناسهٔ ماده را به‌عنوان evidence_id.",
+                                summary=f"REF-HINT: {ids}",
+                            )
+                        )
                 _emit(
                     progress,
                     {

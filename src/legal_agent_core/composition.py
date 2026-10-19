@@ -15,6 +15,7 @@ from datetime import date
 from itertools import count
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from fastapi import FastAPI
 
@@ -583,7 +584,7 @@ def create_app_from_env(settings: Settings | None = None) -> FastAPI:
         InMemoryResearchRecordRepository(),
         authorization,
         metrics,
-        id_factory=lambda: f"req-{next(identifiers)}",
+        id_factory=lambda: f"req-{next(identifiers)}-{uuid4().hex[:8]}",
         agentic=_research_agent_provider(settings, canonical, graph, laws_graph),
         notebook=notebook_repo,
         notebook_topic_resolver=notebook_resolver,
