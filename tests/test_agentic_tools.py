@@ -290,5 +290,109 @@ class TemporalAndHistoryTests(unittest.TestCase):
             self.tools.dispatch(self.store, "search_provisions", ["not", "a", "dict"])
 
 
+class UnifiedSurfaceTests(unittest.TestCase):
+    """The planner-facing surface: one tool per operation, not per ID type."""
+
+    def setUp(self) -> None:
+        self.repository = build_canonical()
+        add_resolved_reference(self.repository)
+        self.tools = LegalResearchTools(self.repository, items_per_page=5)
+        self.store = RefStore()
+        self.at = APPLICABLE.isoformat()
+
+    def test_search_routes_global_document_and_count(self) -> None:
+        global_hit = self.tools.dispatch(
+            self.store, "search", {"query": "مهلت تجدیدنظر", "applicable_time": self.at}
+        )
+        self.assertEqual(global_hit.envelope.status, ToolStatus.OK)
+        self.assertTrue(global_hit.envelope.items)
+
+        document_hit = self.tools.dispatch(
+            self.store,
+            "search",
+            {
+                "query": "مهلت تجدیدنظر",
+                "applicable_time": self.at,
+                "document": "instrument-demo",
+            },
+        )
+        self.assertEqual(document_hit.envelope.status, ToolStatus.OK)
+
+        count = self.tools.dispatch(
+            self.store,
+            "search",
+            {"query": "مهلت تجدیدنظر", "applicable_time": self.at, "mode": "count"},
+        )
+        self.assertEqual(count.envelope.items[0]["matched_provision_versions"], 1)
+
+    def test_read_accepts_evidence_provision_and_version_refs(self) -> None:
+        found = self.tools.dispatch(
+            self.store, "search", {"query": "مهلت تجدیدنظر", "applicable_time": self.at}
+        )
+        evidence_id = found.envelope.items[0]["evidence_id"]
+        by_evidence = self.tools.dispatch(
+            self.store,
+            "read",
+            {"ref": evidence_id, "applicable_time": self.at},
+        )
+        self.assertEqual(by_evidence.envelope.status, ToolStatus.OK)
+
+        by_provision = self.tools.dispatch(
+            self.store,
+            "read",
+            {"ref": "provision-demo-336", "applicable_time": self.at},
+        )
+        self.assertEqual(by_provision.envelope.status, ToolStatus.OK)
+
+        by_version = self.tools.dispatch(
+            self.store,
+            "read",
+            {"ref": "provision-demo-336-v2", "applicable_time": self.at},
+        )
+        self.assertEqual(by_version.envelope.status, ToolStatus.OK)
+        self.assertEqual(
+            by_version.envelope.items[0]["provision_version_id"],
+            "provision-demo-336-v2",
+        )
+
+    def test_outline_versions_neighbors_family_and_browse(self) -> None:
+        outline = self.tools.dispatch(
+            self.store,
+            "outline",
+            {"ref": "instrument-demo", "applicable_time": self.at},
+        )
+        self.assertEqual(outline.envelope.status, ToolStatus.OK)
+
+        history = self.tools.dispatch(
+            self.store,
+            "versions",
+            {
+                "provision_id": "provision-demo-336",
+                "applicable_time": self.at,
+                "history": True,
+            },
+        )
+        self.assertEqual(history.envelope.status, ToolStatus.OK)
+
+        neighbors = self.tools.dispatch(
+            self.store,
+            "neighbors",
+            {"ref": "provision-demo-336", "applicable_time": self.at},
+        )
+        self.assertIn(neighbors.envelope.status, (ToolStatus.OK, ToolStatus.EMPTY))
+
+        family = self.tools.dispatch(
+            self.store,
+            "family",
+            {"instrument": "instrument-demo", "applicable_time": self.at},
+        )
+        self.assertIn(family.envelope.status, (ToolStatus.OK, ToolStatus.EMPTY))
+
+        browse = self.tools.dispatch(
+            self.store, "browse", {"query": "آیین", "applicable_time": self.at}
+        )
+        self.assertEqual(browse.envelope.status, ToolStatus.OK)
+
+
 if __name__ == "__main__":
     unittest.main()

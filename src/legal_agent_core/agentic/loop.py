@@ -53,22 +53,19 @@ _SYSTEM_TEMPLATE = """شما ایجنت پژوهش حقوقی فقط-خواند�
      پاسخ بده و محدود بودن پوشش را صریح اعلام کن. بیش از ۲ صفحه پیاپی از یک جست‌وجوی یکسان نگیر.
    - EMPTY یعنی صفر نتیجه برای ورودی معتبر؛ NOT_FOUND یعنی شناسه وجود ندارد؛ ERROR/PARTIAL یعنی شکست یا نتیجه‌ی ناقص — یک بار تلاش مجدد کن یا صریح اعلام کن. شکست ابزار هرگز به معنی «یافت نشد» نیست.
 ۴. استناد دقیق و ناوبری سند: هر ادعا را به تکه‌ای وصل کن که واقعاً خوانده‌ای.
-   نردبان اسناد بلند: (۱) get_document_structure → فهرست بخش‌ها با بازه‌ی صفحه؛
-   (۲) بخشِ محتمل را از فهرست انتخاب کن؛ (۳) find_in_document با page_from/page_to
-   همان بازه؛ (۴) تکه‌ی حاوی پاسخ را read_span کن. **قاعده‌ی cite:** evidence_id ای را
-   بزن که متنِ نقل‌شده‌اش واقعاً حاوی جمله‌ی ادعاست — از search یا find یا read_span
-   فرقی ندارد (صفحه‌ی hit جست‌وجو گاهی درست‌تر از تکه‌ی خوانده‌شده است). اگر پاسخ در آن
-   بخش نبود، به فهرست برگرد و بخشِ محتمل بعدی را امتحان کن — مثل کسی که فهرست کتاب را
-   دوباره ورق می‌زند.
-۵. انتخاب سند و بهداشت کوئری: اگر «جهت‌گیری اولیه» target_id سند یا ساختار سند داده است،
-   نخست همان شناسه را با get_document_structure/find_in_document به‌کار ببر. اگر نامزدها
-   نامرتبط یا ناکافی بودند، جست‌وجوی سراسری را به‌عنوان مسیر بازیابی انجام بده. جست‌وجو
-   فقط با ۲ تا ۴ کلیدواژه‌ی نهادی/حقوقی باشد (نام مفاهیم، نه روایت).
-   اسم اشخاص، جملات محاوره‌ای و تاریخ‌های محاوره‌ای را در کوئری نیاور؛ اعداد را رقمی
-   بنویس (۳۰ نه «سی»). نردبان: search کوتاه → find_in_document روی سند مشخص →
-   list_documents برای جهت‌یابی → بازنویسی با مترادف حقوقی. اگر نتایج EMPTY/PARTIAL
-   ضعیف بود: expand_search_terms برای کوئری‌های جایگزین و semantic_search برای
-   جست‌وجوی معنایی (اگر پاسخ ERROR داد یعنی در دسترس نیست، به واژگانی برگرد).
+   نردبان اسناد بلند: (۱) outline(ref=سند) → فهرست بخش‌ها با بازهٔ صفحه؛
+   (۲) بخشِ محتمل را انتخاب کن؛ (۳) search(query, document=سند, page_from/page_to)
+   همان بازه؛ (۴) تکه‌ی حاوی پاسخ را read(ref=evidence_id/span) کن. **قاعده‌ی cite:**
+   evidence_id ای را بزن که متنِ نقل‌شده‌اش واقعاً حاوی جمله‌ی ادعاست — از search یا
+   read فرقی ندارد. اگر پاسخ در آن بخش نبود، به outline برگرد و بخشِ بعدی را امتحان کن.
+۵. انتخاب سند و بهداشت کوئری: اگر «جهت‌گیری اولیه» target_id داده است، نخست
+   outline(ref=همان target_id) را ببین؛ اگر باز نشد یا نامرتبط بود، جست‌وجوی سراسری
+   search(query) را انجام بده. جست‌وجو فقط با ۲ تا ۴ کلیدواژه‌ی نهادی/حقوقی باشد
+   (نام مفاهیم، نه روایت). اسم اشخاص، جملات محاوره‌ای و تاریخ‌های محاوره‌ای را در
+   کوئری نیاور؛ اعداد را رقمی بنویس (۳۰ نه «سی»). نردبان: search کوتاه →
+   outline → search(document, page_from/page_to) → read. اگر نتایج EMPTY/PARTIAL
+   بود: browse برای سند جایگزین، یا search با مترادف حقوقی؛ semantic_search فقط
+   وقتی mode=semantic در دسترس باشد.
 ۶. پرسش‌های ترکیبی/پرونده‌ای را به وجوه بشکن (هر شخص، سند یا حکم یک وجه)؛ هر وجه را
    جدا تحقیق کن و claim جدا با evidence خودش بساز. پیش از answer پوشش همه‌ی وجوه را
    کنترل کن؛ وجهِ بدون اثر را یا ادامه بده یا در متن پاسخ صریحاً «پوشش ناقص» اعلام کن —
@@ -76,28 +73,32 @@ _SYSTEM_TEMPLATE = """شما ایجنت پژوهش حقوقی فقط-خواند�
 ۷. امتناع آخرین گزینه است: اگر راه معناداری برای بررسی شکاف شواهد باقی مانده،
    همان را دنبال کن. پس از بررسی مسیرهای مرتبط، اگر هنوز سند لازم در مخزن یافت نشد،
    با ذکر دقیق سند/دادهٔ مفقود abstain کن. حدس و دانش بیرونی همیشه ممنوع است.
-   برای واقعه‌ی تاریخی (سال Y): با list_documents(applicable_time=تاریخ واقعه) کنترل کن
+   برای واقعه‌ی تاریخی (سال Y): با browse(applicable_time=تاریخ واقعه) کنترل کن
    آیا منبع هم‌دوره در مجموعه هست؛ نبودِ منبع هم‌دوره = امتناعِ مستند با همین استدلال.
 ۸. به‌محض پاسخ‌پذیر بودن پرسش، پاسخ نهایی بده؛ ادامه‌ی جست‌وجو پس از کفایت ممنوع.
    EMPTY پیاپی یعنی همان کوئری را تکرار نکن — سند یا واژگان حقوقی متفاوت امتحان کن.
    {budget_policy}
 ۹. لایه‌ی قضایی: وقتی قانون/ماده‌ی حاکم را یافتی و پرسش به اجرای عملی، تعارض آرا،
-   یا اعتبار/ابطال مقرره مربوط است، با judgments_for_law روی همان قانون آرای وحدت
-   رویه/دیوان و نظریات مشورتی مرتبط را ببین (یا با search_judgments موضوع را مستقیم
-   جست‌وجو کن) و خلاصه/متن رأی را با get_judgment_text بخوان. رأی در استدلال می‌آید
-   ولی ادعاها همچنان باید به evidence ماده مستند بمانند؛ لازم‌الاتباع (رأی وحدت رویه/
-   هیئت عمومی) را از متقاعدکننده (نظریه مشورتی/رویه‌ی قضایی) جدا کن.
+   یا اعتبار/ابطال مقرره مربوط است، با browse(kind=judgment, query=موضوع یا عنوان قانون)
+   آرای وحدت رویه/دیوان و نظریات مشورتی مرتبط را ببین (kind=opinion برای نظریه) و
+   متن رأی را با read(ref=شناسهٔ رأی) بخوان. رأی در استدلال می‌آید ولی ادعاها همچنان
+   باید به evidence ماده مستند بمانند؛ لازم‌الاتباع (رأی وحدت رویه/هیئت عمومی) را از
+   متقاعدکننده (نظریه مشورتی/رویه‌ی قضایی) جدا کن.
    مهم: شناسهٔ گره‌های گراف، document_uid رأی و provision_id هرگز evidence_id نیستند؛
    فقط مقدار فیلد evidence_id در خروجی ابزارهای کانونیکال شاهد است. اگر رأی به ماده‌ی
-    X قانون Y استناد کرده (cited_laws)، همان ماده را با search_provisions پیدا کن و
-    evidence_id آن را شاهد قرار بده؛ خودِ رأی را فقط در متن پاسخ نام ببر.
+   X قانون Y استناد کرده (cited_laws)، همان ماده را با search پیدا کن و
+   evidence_id آن را شاهد قرار بده؛ خودِ رأی را فقط در متن پاسخ نام ببر.
  ۹.۵ ناوبری مفهومی: کنترل‌کننده پیش از نخستین تصمیم، درخت و در صورت وجود دفترچه را بررسی
     و target_idهای قابل اقدام را در «جهت‌گیری اولیه» تزریق می‌کند. همان موضوع را
-    دوباره به walk_tree نده؛ اگر جست‌وجوی اولیه نامرتبط بود، یک مفهوم حقوقی دقیق‌تر
-    استخراج کن و با آن مسیر تازه‌ای بگیر. این لایه فقط راهنماست و هرگز شاهد نیست.
+    دوباره با navigate(mode=path) تکرار نکن؛ اگر مسیر اولیه نامرتبط بود، یک مفهوم
+    حقوقی دقیق‌تر استخراج کن و navigate(topic=مفهوم تازه) بگیر. این لایه فقط راهنماست
+    و هرگز شاهد نیست.
  ۱۰. ابزارهای موجود:
 {tool_catalog}
-راهنمای لازم هر مرحله در متن «مرحلهٔ فعلی» آمده است؛ برای روند عادی ابزار skill را صدا نزن.
+راهنمای انتخاب ابزار: هر بازیابی متنی → search؛ بازکردن نتیجه → read؛ سند بلند →
+outline سپس search(document/page) سپس read؛ تاریخ/نسخه → versions؛ ارجاع/استناد →
+neighbors؛ رویهٔ قضایی → browse(kind=judgment) سپس read؛ موضوع/مسیر → navigate.
+برای روند عادی ابزار skill را صدا نزن.
 
 ## قرارداد خروجی (الزامی) — دقیقاً یک شیء JSON:
 فراخوانی ابزار: {{"action":"tool","tool":"نام","args":{{...}},"thought":"..."}}
@@ -204,6 +205,14 @@ class PlannerCallTrace:
 #: every hop says WHY it was taken (structure/citation/basis/...), not just which
 #: tool ran.
 _TOOL_REASON: dict[str, str] = {
+    "search": "search",
+    "read": "read",
+    "outline": "structure",
+    "browse": "search",
+    "versions": "version",
+    "neighbors": "citation",
+    "family": "statutory_basis",
+    "navigate": "notebook",
     "search_provisions": "search",
     "aggregate_count": "search",
     "find_in_document": "search",
@@ -278,6 +287,19 @@ def _tool_reason(tool: str) -> str:
     return _TOOL_REASON.get(tool, "other")
 
 
+#: Tools whose contract requires a date. The planner often omits it on the
+#: first turn; the run's applicable_time is a safe, deterministic default.
+_APPLICABLE_TOOLS = frozenset(
+    {
+        "search", "read", "outline", "browse", "versions", "neighbors", "family",
+        "search_provisions", "get_provision_version", "get_version_history",
+        "get_references", "temporal_check", "aggregate_count", "find_in_document",
+        "read_span", "search_in_subtree", "get_document_structure",
+        "list_documents", "get_statute_family", "get_related",
+    }
+)
+
+
 @dataclass(slots=True)
 class _StepRecord:
     step: int
@@ -291,7 +313,7 @@ class _StepRecord:
             body = (
                 body[:MAX_STEP_TEXT]
                 + f"\n…(بریده شد؛ {len(body) - MAX_STEP_TEXT} نویسهٔ بعدی حذف شد — "
-                "برای متن کامل، read_span را روی همین span تکرار کن)"
+                "برای متن کامل، read را روی همین span تکرار کن)"
             )
         return f"[گام {self.step}] {body}"
 
@@ -321,6 +343,9 @@ _DEAD_END_WARNING = (
 @dataclass(slots=True)
 class _RunState:
     store: RefStore = field(default_factory=RefStore)
+    #: Run-level date injected when a planner omits applicable_time (the model
+    #: frequently drops it on the first call, wasting a whole decision).
+    applicable_time: str = ""
     steps: list[_StepRecord] = field(default_factory=list)
     trace: list[ToolCallTrace] = field(default_factory=list)
     planner_trace: list[PlannerCallTrace] = field(default_factory=list)
@@ -414,6 +439,7 @@ class ToolResearchLoop:
         )
         ledger = EvidenceLedger()
         state = _RunState()
+        state.applicable_time = applicable_time.isoformat()
         state.query_anchors = _query_anchors(question)
         self.last_trace = ()
         self.last_planner_trace = ()
@@ -755,8 +781,8 @@ class ToolResearchLoop:
                                 "ref_hint",
                                 f"ارجاع صریح دنبال‌نشده برای این ماده(ها): {ids}\n"
                                 "برای برطرف‌کردن، همان ماده را با "
-                                '`get_related(provision_id="<id>", applicable_time=...)` '
-                                "یا `read_span(source_span_id=\"<id>\", applicable_time=...)` "
+                                '`neighbors(ref="<id>", applicable_time=...)` '
+                                "یا `read(ref=\"<id>\", applicable_time=...)` "
                                 "(اکنون شناسهٔ ماده را هم می‌پذیرد) باز کن و شاهدش را در claim "
                                 "استناد بده — نه شناسهٔ ماده را به‌عنوان evidence_id.",
                                 summary=f"REF-HINT: {ids}",
@@ -804,7 +830,13 @@ class ToolResearchLoop:
         deadline: float | None = None,
     ) -> None:
         started = time.monotonic()
-        if tool == "search_provisions":
+        if (
+            tool in _APPLICABLE_TOOLS
+            and "applicable_time" not in args
+            and state.applicable_time
+        ):
+            args = {**args, "applicable_time": state.applicable_time}
+        if tool in {"search", "search_provisions", "find_in_document"}:
             args = self._preserve_query_anchor(args, state.query_anchors)
         key = (tool, json.dumps(args, ensure_ascii=False, sort_keys=True))
         cached = state.repeat_cache.get(key)
@@ -866,9 +898,9 @@ class ToolResearchLoop:
             message = (
                 "NEAR-DUPLICATE-SEARCH: این کوئری از نظر واژگان و محدوده تقریباً "
                 "همان جست‌وجوی قبلی است و اجرا نشد. نامزدهای قبلی: "
-                f"{candidates}. اگر مرتبط‌اند سند/ماده را با find_in_document یا "
-                "get_document_structure بررسی کن؛ اگر نامرتبط‌اند مفهوم یا مسیر "
-                "را واقعاً عوض کن (مثلاً walk_tree، سند دیگر یا واژگان متفاوت)."
+                f"{candidates}. اگر مرتبط‌اند سند/ماده را با search(document=..., page_from/page_to) "
+                "یا outline(ref=...) بررسی کن؛ اگر نامرتبط‌اند مفهوم یا مسیر "
+                "را واقعاً عوض کن (مثلاً navigate، سند دیگر یا واژگان متفاوت)."
             )
             state.steps.append(_StepRecord(step, "search_pivot", message, summary=message))
             state.trace.append(
@@ -1052,7 +1084,7 @@ class ToolResearchLoop:
             previous_ids = state.last_search_evidence_ids
             if (
                 previous is not None
-                and signature[0] == "search_provisions"
+                and signature[0] in {"search", "search_provisions", "find_in_document"}
                 and previous[0] == signature[0]
                 and previous_ids is not None
                 and not evidence_ids - previous_ids
@@ -1148,7 +1180,7 @@ class ToolResearchLoop:
                     step,
                     "nav_hint",
                     nav_hint,
-                    summary="NAV-HINT: get_document_structure",
+                    summary="NAV-HINT: outline",
                 )
             )
         _emit(
@@ -1230,7 +1262,7 @@ class ToolResearchLoop:
         # step is older than recent_full_steps its full payload is dropped, and
         # without the excerpt the model re-reads the same span again and again.
         excerpt = ""
-        if tool in {"read_span", "get_provision_version", "get_provision_text"}:
+        if tool in {"read", "read_span", "get_provision_version", "get_provision_text"}:
             for item in envelope.items:
                 if isinstance(item, dict) and item.get("text"):
                     text = " ".join(str(item["text"]).split())[:240]
@@ -1319,7 +1351,7 @@ class ToolResearchLoop:
                     )
                 return (
                     "مرحلهٔ فعلی: انتخاب و بازکردن سند. از target_id/عنوان نامزدهای "
-                    "جهت‌گیری برای get_document_structure یا find_in_document استفاده کن. "
+                    "جهت‌گیری برای outline(ref=...) یا search(document=...) استفاده کن. "
                     "اگر نامزدها نامرتبط بودند، یک جست‌وجوی محدود بازیابی انجام بده."
                 )
             return "مرحلهٔ فعلی: بازیابی سند مرتبط با یک کوئری کوتاه حقوقی."
@@ -1348,7 +1380,8 @@ class ToolResearchLoop:
 
     #: Tools whose successful hits mean "we are grinding inside one document".
     _NAV_TOOLS = frozenset(
-        {"search_provisions", "find_in_document", "read_span", "list_document_contents"}
+        {"search", "browse", "read", "search_provisions", "find_in_document",
+         "read_span", "list_document_contents"}
     )
 
     @staticmethod
@@ -1369,8 +1402,8 @@ class ToolResearchLoop:
         """
         if envelope.status in (ToolStatus.EMPTY, ToolStatus.ERROR, ToolStatus.NOT_FOUND):
             return None
-        if tool == "get_document_structure":
-            document = args.get("document")
+        if tool in {"outline", "get_document_structure"}:
+            document = args.get("ref") or args.get("document")
             if isinstance(document, str) and document.strip():
                 state.structure_keys.add(cls._fold(document))
             return None
@@ -1396,9 +1429,9 @@ class ToolResearchLoop:
                 hint = (
                     f"نکتهٔ ناوبری: روی سند «{title}» {state.doc_touch[key]} بار "
                     "جست‌وجو/خواندن شده ولی فهرست بخش‌هایش دیده نشده. "
-                    f"get_document_structure(document=«{title}») نقشهٔ بخش‌ها را با "
-                    "بازهٔ صفحه می‌دهد؛ بخشِ محتمل را انتخاب کن، find_in_document با "
-                    "page_from/page_to همان بازه بزن، تکهٔ حاوی پاسخ را read_span کن و "
+                    f"outline(ref=«{title}») نقشهٔ بخش‌ها را با "
+                    "بازهٔ صفحه می‌دهد؛ بخشِ محتمل را انتخاب کن، search(document=..., "
+                    "page_from/page_to) در همان بازه بزن، تکهٔ حاوی پاسخ را read کن و "
                     "evidence_id ای را cite کن که متنش حاوی جملهٔ ادعاست. اگر پاسخ نبود، "
                     "به فهرست برگرد و بخشِ بعدی را امتحان کن."
                 )
@@ -1723,8 +1756,9 @@ class ToolResearchLoop:
                     "## جهت‌گیری اولیه (نقشهٔ ناوبری)\n"
                     + "\n\n".join(blocks)
                     + "\n\nاگر یکی از این اسناد مربوط بود، مستقیم با "
-                    "`get_document_structure(document=\"<target_id>\")` بازش کن و با "
-                    "list_children/search_in_subtree داخلش پایین برو؛ سپس ادعا را با evidence "
+                    "`outline(ref=\"<target_id>\")` بازش کن و با "
+                    "`search(mode=subtree, root_provision_id=...)` یا "
+                    "`navigate(mode=children, node_id=...)` داخلش پایین برو؛ سپس ادعا را با evidence "
                     "مستند کن. اگر این نقشه به پرسش مربوط نبود، نادیده بگیر و مسیر معمول را ادامه بده.",
                     summary="ORIENTATION: actionable tree targets + notebook hint",
                 )
@@ -1816,6 +1850,14 @@ class ToolResearchLoop:
         status: str,
     ) -> None:
         action_type = {
+            "search": ResearchActionType.SEARCHED,
+            "browse": ResearchActionType.SEARCHED,
+            "navigate": ResearchActionType.SEARCHED,
+            "read": ResearchActionType.OPENED,
+            "outline": ResearchActionType.OPENED,
+            "versions": ResearchActionType.CHECKED_VERSION,
+            "neighbors": ResearchActionType.FOLLOWED_REFERENCE,
+            "family": ResearchActionType.FOLLOWED_REFERENCE,
             "search_provisions": ResearchActionType.SEARCHED,
             "aggregate_count": ResearchActionType.SEARCHED,
             "get_provision_version": ResearchActionType.OPENED,
@@ -1835,8 +1877,11 @@ class ToolResearchLoop:
             "notebook_index": ResearchActionType.SEARCHED,
         }.get(tool, ResearchActionType.SEARCHED)
         target = (
-            args.get("provision_version_id")
+            args.get("ref")
+            or args.get("provision_version_id")
             or args.get("provision_id")
+            or args.get("instrument")
+            or args.get("topic")
             or args.get("query")
         )
         episode.record(

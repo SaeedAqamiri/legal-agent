@@ -22,13 +22,23 @@ from .graph_tools import (
 from .mcp import tool_schema
 from .notebook_tools import NOTEBOOK_TOOL_SPECS, NotebookTools
 from .skill_router import load_skill
-from .tools import TOOL_SPECS, LegalResearchTools, ToolResult
+from .tools import TOOL_SPECS, LegalResearchTools, ToolResult, ToolSpec
 from .tree_tools import TREE_TOOL_SPECS, TreeTools
 
 _GRAPH_TOOL_NAMES = frozenset(spec.name for spec in GRAPH_TOOL_SPECS)
 _NOTEBOOK_TOOL_NAMES = frozenset(spec.name for spec in NOTEBOOK_TOOL_SPECS)
 _TREE_TOOL_NAMES = frozenset(spec.name for spec in TREE_TOOL_SPECS)
 _SKILL_TOOL = "skill"
+_NAVIGATE_TOOL = "navigate"
+_ROUTED_CANONICAL = frozenset({"read", "browse", "neighbors"})
+
+NAVIGATE_SPEC = ToolSpec(
+    "navigate",
+    "ناوبری مفهومی با یک ورودی: mode=path مسیر ریشه→اسناد مرتبط با topic؛ "
+    "mode=children فرزندان یک node_id؛ mode=notebook صفحهٔ دفترچه؛ mode=routes مسیرهای "
+    "آموختهٔ یک موضوع. این لایه فقط کوتاه‌کنندهٔ مسیر است، نه شاهد.",
+    ("topic?", "node_id?", "mode?", "limit?"),
+)
 
 
 class CompositeTools:
@@ -49,6 +59,10 @@ class CompositeTools:
     def dispatch(self, store: RefStore, name: str, args: dict[str, Any]) -> ToolResult:
         if name == _SKILL_TOOL:
             return ToolResult(self._skill(store, args), ())
+        if name == _NAVIGATE_TOOL:
+            return ToolResult(self._navigate(store, args), ())
+        if name in _ROUTED_CANONICAL:
+            return self._route(store, name, args)
         if self.tree is not None and name in _TREE_TOOL_NAMES:
             return ToolResult(self.tree.dispatch(store, name, args), ())
         if self.notebook is not None and name in _NOTEBOOK_TOOL_NAMES:
@@ -58,11 +72,124 @@ class CompositeTools:
             return ToolResult(envelope, ())
         return self.canonical.dispatch(store, name, args)
 
+    def _route(self, store: RefStore, name: str, args: dict[str, Any]) -> Any:
+        """Send one unified call to canonical, graph, or a fallback.
+
+        ``read``/``browse``/``neighbors`` hide three different backends behind
+        one address space: a span/provision/evidence id reads canonical text,
+        a judgment id reads the judicial layer, and an instrument id traverses
+        the graph. The first backend that produces a real result wins.
+        """
+        if name == "read":
+            result = self.canonical.dispatch(store, name, args)
+            if (
+                result.envelope.status in (ToolStatus.NOT_FOUND, ToolStatus.ERROR)
+                and self.graph is not None
+            ):
+                ref = args.get("ref")
+                if isinstance(ref, str) and ref.strip():
+                    fallback = self.graph.dispatch(
+                        store, "get_judgment_text", {"judgment_id": ref.strip()}
+                    )
+                    if fallback.status is ToolStatus.OK:
+                        return ToolResult(fallback, ())
+            return result
+        if name == "browse":
+            kind = str(args.get("kind") or "").strip().lower()
+            query = args.get("query")
+            if self.graph is not None and isinstance(query, str) and query.strip():
+                if kind in {"judgment", "opinion", "ruling", "precedent"}:
+                    payload = {"topic": query.strip(), "limit": args.get("limit")}
+                    if kind in {"judgment", "opinion"}:
+                        payload["kind"] = kind
+                    return ToolResult(
+                        self.graph.dispatch(
+                            store, "search_judgments", self._compact(payload)
+                        ),
+                        (),
+                    )
+                if kind in {"law", "instrument", "statute"}:
+                    # Catalog rows from canonical carry instrument_id/ref that
+                    # outline()/search(document=...) can consume directly;
+                    # graph search_laws is summary-only and produces no refs.
+                    return self.canonical.dispatch(store, name, args)
+            return self.canonical.dispatch(store, name, args)
+        if name == "neighbors":
+            ref = str(args.get("ref") or "")
+            if self.graph is not None and ref.startswith("inst_"):
+                return ToolResult(
+                    self.graph.dispatch(
+                        store,
+                        "node_neighbors",
+                        self._compact(
+                            {
+                                "node_id": ref,
+                                "rel_types": args.get("rel_types"),
+                                "limit": args.get("limit") or 50,
+                            }
+                        ),
+                    ),
+                    (),
+                )
+            return self.canonical.dispatch(store, name, args)
+        return self.canonical.dispatch(store, name, args)
+
+    @staticmethod
+    def _compact(args: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in args.items() if value is not None}
+
+    def _navigate(self, store: RefStore, args: dict[str, Any]) -> Any:
+        topic = args.get("topic")
+        node_id = args.get("node_id")
+        mode = str(args.get("mode") or "").strip().lower()
+        limit = args.get("limit") or 5
+        if not mode:
+            mode = "path" if isinstance(topic, str) and topic.strip() else "children"
+        if mode in {"path", "walk"}:
+            if self.tree is None:
+                return empty_envelope(store, ToolStatus.ERROR, ("درخت مفهومی پیکربندی نشده است",))
+            return self.tree.dispatch(
+                store,
+                "walk_tree",
+                self._compact({"topic": topic, "limit": limit}),
+            )
+        if mode in {"children", "tree", "list"}:
+            if self.tree is None:
+                return empty_envelope(store, ToolStatus.ERROR, ("درخت مفهومی پیکربندی نشده است",))
+            return self.tree.dispatch(
+                store, "list_tree", self._compact({"node_id": node_id})
+            )
+        if mode in {"routes", "route"}:
+            if self.notebook is None:
+                return empty_envelope(store, ToolStatus.ERROR, ("دفترچهٔ پژوهش پیکربندی نشده است",))
+            return self.notebook.dispatch(
+                store,
+                "notebook_route",
+                {"topic_id": node_id or topic or ""},
+            )
+        if mode in {"notebook", "page"}:
+            if self.notebook is None:
+                return empty_envelope(store, ToolStatus.ERROR, ("دفترچهٔ پژوهش پیکربندی نشده است",))
+            if isinstance(node_id, str) and node_id.strip():
+                return self.notebook.dispatch(
+                    store, "open_notebook", {"node_id": node_id.strip()}
+                )
+            return self.notebook.dispatch(
+                store,
+                "notebook_index",
+                self._compact({"domain": args.get("domain")}),
+            )
+        return empty_envelope(
+            store, ToolStatus.ERROR, (f"unknown navigate mode {mode!r}",)
+        )
+
     def spec_available(self, name: str) -> bool:
         if name in getattr(self.canonical, "hidden_tools", frozenset()):
             return False
         if name == _SKILL_TOOL:
             return True
+        if name == _NAVIGATE_TOOL:
+            return self.tree is not None or self.notebook is not None
         if name in _TREE_TOOL_NAMES:
             return self.tree is not None
         if name in _NOTEBOOK_TOOL_NAMES:
@@ -78,6 +205,13 @@ class CompositeTools:
             "skill(name) — بارگذاری متن یک مهارت (رویهٔ گام‌به‌گام) وقتی با وظیفه‌ای "
             "هم‌خوان است؛ نام‌ها در فهرست مهارت‌های پرامپت آمده‌اند."
         )
+        if self.spec_available(_NAVIGATE_TOOL):
+            catalog += (
+                "\n\n## ناوبری مفهومی (درخت + دفترچه — فقط راهنما)\n"
+                + NAVIGATE_SPEC.signature()
+                + " — "
+                + NAVIGATE_SPEC.description
+            )
         if self.tree is not None:
             tree_lines = [
                 spec.signature() + " — " + spec.description
@@ -142,22 +276,57 @@ class CompositeTools:
             schemas.extend(
                 schema
                 for schema in graph_tool_schemas()
-                if names is None
-                or schema.get("function", {}).get("name") in names
+                if self.spec_available(schema.get("function", {}).get("name", ""))
+                and (
+                    names is None
+                    or schema.get("function", {}).get("name") in names
+                )
             )
         if self.tree is not None:
             schemas.extend(
                 schema
                 for schema in self._simple_schemas(TREE_TOOL_SPECS)
-                if names is None
-                or schema.get("function", {}).get("name") in names
+                if self.spec_available(schema.get("function", {}).get("name", ""))
+                and (
+                    names is None
+                    or schema.get("function", {}).get("name") in names
+                )
             )
         if self.notebook is not None:
             schemas.extend(
                 schema
                 for schema in self._simple_schemas(NOTEBOOK_TOOL_SPECS)
+                if self.spec_available(schema.get("function", {}).get("name", ""))
+                and (
+                    names is None
+                    or schema.get("function", {}).get("name") in names
+                )
+            )
+        if self.spec_available(_NAVIGATE_TOOL):
+            schemas.extend(
+                schema
+                for schema in self._simple_schemas((NAVIGATE_SPEC,))
                 if names is None
                 or schema.get("function", {}).get("name") in names
+            )
+        if names is None or _SKILL_TOOL in names:
+            schemas.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": _SKILL_TOOL,
+                        "description": (
+                            "بارگذاری متن یک مهارت رویه‌ای (گام‌به‌گام) وقتی با "
+                            "وظیفه‌ای هم‌خوان است."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                            "required": ["name"],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
             )
         return tuple(schemas)
 

@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from legal_agent_core.agentic import AgenticConfig, LegalResearchTools, ToolResearchLoop
 from legal_agent_core.agentic.planner import LLMToolPlanner
 from legal_agent_core.agentic.term_expander import LLMTermExpander
+from legal_agent_core.agentic.tools import LEGACY_TOOL_NAMES
 from legal_agent_core.adapters import OpenAICompatibleGateway
 from legal_agent_core.application import (
     InMemoryResearchRecordRepository,
@@ -450,6 +451,11 @@ def main() -> int:
         "e.g. --hide-tools get_document_structure)",
     )
     parser.add_argument(
+        "--legacy-surface", action="store_true",
+        help="advertise the old fine-grained tools instead of the unified "
+        "search/read/outline/browse/versions/neighbors/family surface",
+    )
+    parser.add_argument(
         "--shard", default=None,
         help="run a slice of the cases, e.g. 1/4 (round-robin by index)",
     )
@@ -466,6 +472,9 @@ def main() -> int:
         print(json.dumps(report.get("overall", report), ensure_ascii=False, indent=2))
         return 0
 
+    hidden = args.hide_tools
+    if hidden is None and not args.legacy_surface:
+        hidden = sorted(LEGACY_TOOL_NAMES)
     budgets = {
         "max_steps": args.max_steps,
         "wall_seconds": args.wall_seconds,
@@ -473,7 +482,7 @@ def main() -> int:
         "max_output_tokens": args.max_output_tokens,
         "timeout_seconds": args.timeout_seconds,
         "disable_thinking": args.disable_thinking,
-        "hidden_tools": args.hide_tools,
+        "hidden_tools": hidden,
     }
     shard: tuple[int, int] | None = None
     if args.shard:

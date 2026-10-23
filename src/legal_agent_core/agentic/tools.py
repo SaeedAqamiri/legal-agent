@@ -60,6 +60,51 @@ class ToolSpec:
 
 TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
+        "search",
+        "جست‌وجوی واحد حقوقی: متن آزاد در کل مخزن یا یک سند/بازهٔ صفحه. "
+        "mode=text (پیش‌فرض)، count (شمارش قطعی)، subtree (داخل یک زیردرخت)، "
+        "semantic (اگر فعال باشد). برای هر بازیابی متنی ابتدا همین را صدا بزن.",
+        ("query", "applicable_time", "scope?", "document?", "page_from?", "page_to?",
+         "root_provision_id?", "mode?", "cursor?"),
+    ),
+    ToolSpec(
+        "read",
+        "بازکردن هر مرجع با یک شناسهٔ یکپارچه: evidence_id (ev-…)، source_span_id "
+        "(span_…)، provision_id (prov_…) یا provision_version_id (provv_…). "
+        "برای ادامهٔ متن بلند offset بده. رأی/نظریه را هم با شناسهٔ خودش می‌خواند.",
+        ("ref", "applicable_time", "offset?"),
+    ),
+    ToolSpec(
+        "outline",
+        "نقشهٔ ساختاری: برای سند/قانون، درخت بخش/فصل/ماده با بازهٔ صفحه؛ "
+        "برای یک ماده/کانتینر، فرزندان مستقیم آن. پیش از پیمایش درون سند.",
+        ("ref", "applicable_time", "cursor?"),
+    ),
+    ToolSpec(
+        "browse",
+        "مرور سطح سند: قوانین/آیین‌نامه‌ها (kind=law) یا آرای وحدت رویه/دیوان و "
+        "نظریات مشورتی (kind=judgment|opinion). برای یافتن سند قبل از جست‌وجوی داخل آن.",
+        ("query?", "applicable_time", "kind?", "limit?"),
+    ),
+    ToolSpec(
+        "versions",
+        "نسخه‌های زمانی یک ماده: history=false نسخهٔ قابل اعمال در تاریخ را می‌دهد؛ "
+        "history=true همهٔ نسخه‌ها و بازه‌های اعتبار را.",
+        ("provision_id", "applicable_time", "history?"),
+    ),
+    ToolSpec(
+        "neighbors",
+        "همسایه‌های یک مرجع: ارجاع‌های صریح خروجی/ورودی ماده، همسایه‌های گراف یک سند، "
+        "یا مسیر کوتاه بین دو گره (depth>1).",
+        ("ref", "applicable_time", "rel_types?", "direction?", "depth?"),
+    ),
+    ToolSpec(
+        "family",
+        "خانوادهٔ قانون‌گذاری یک سند: مبانی قانونی (به استناد) و مشتقات آن — "
+        "برای «کدام قانون حاکم است» از بالا به پایین.",
+        ("instrument", "applicable_time"),
+    ),
+    ToolSpec(
         "search_provisions",
         "جست‌وجوی متنی مواد/متن‌های قانونی با gate زمانی و scope؛ مرتب‌سازی قطعی",
         ("query", "applicable_time", "document_scope?", "cursor?"),
@@ -150,6 +195,36 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
 
 _TOOL_NAMES = frozenset(spec.name for spec in TOOL_SPECS)
 
+#: The old fine-grained surface kept dispatchable for scripts/tests/MCP but
+#: hidden from the planner once the unified tools are available. The unified
+#: surface is 8 canonical/composite tools + skill; these wrappers stay for
+#: backward compatibility and internal helpers (orientation etc.).
+LEGACY_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "search_provisions",
+        "get_provision_version",
+        "get_version_history",
+        "get_references",
+        "temporal_check",
+        "aggregate_count",
+        "find_in_document",
+        "read_span",
+        "list_document_contents",
+        "list_children",
+        "search_in_subtree",
+        "get_document_structure",
+        "list_documents",
+        "get_statute_family",
+        "get_related",
+        "expand_search_terms",
+        "semantic_search",
+    }
+)
+
+UNIFIED_TOOL_NAMES: frozenset[str] = frozenset(
+    {"search", "read", "outline", "browse", "versions", "neighbors", "family"}
+)
+
 
 def tool_catalog(tools: LegalResearchTools | None = None) -> str:
     """Planner-facing catalog appended to the system prompt.
@@ -230,6 +305,202 @@ class LegalResearchTools:
 
     def tool_catalog(self) -> str:
         return tool_catalog(self)
+
+    # ------------------------------------------------------------ unified tools
+    # One composable surface over the fine-grained repository operations. The
+    # old handlers stay dispatchable (scripts, MCP, internal orientation) but
+    # the planner only sees these; this removes the ID/scope guessing that the
+    # benchmark traces showed (find_in_document(instrument_id) etc.).
+
+    @staticmethod
+    def _clean(args: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in args.items() if value is not None}
+
+    def _search(self, store: RefStore, args: dict[str, Any]) -> ToolResult:
+        query = require_str(args, "query")
+        applicable_time = require_date(args, "applicable_time")
+        mode = str(args.get("mode") or "text").strip().lower()
+        scope = args.get("scope", args.get("document_scope"))
+        if isinstance(scope, str):
+            normalized_scope = scope.strip().lower()
+            # Planner shorthand: ``scope="law"`` means "no document filter",
+            # not a literal document title (it produced empty searches).
+            if normalized_scope in {
+                "law", "laws", "instrument", "instruments", "statute", "statutes",
+                "document", "documents", "all", "*",
+            }:
+                scope = None
+            else:
+                scope = [scope]
+        document = optional_str(args, "document")
+        page_from = optional_int(args, "page_from")
+        page_to = optional_int(args, "page_to")
+        root = optional_str(args, "root_provision_id")
+        cursor = optional_cursor(args)
+        if mode in {"count", "aggregate"}:
+            return self._aggregate_count(
+                store,
+                self._clean(
+                    {"query": query, "applicable_time": applicable_time.isoformat(),
+                     "document_scope": scope}
+                ),
+            )
+        if mode in {"subtree"} or root:
+            if not root:
+                raise ToolArgumentError("mode=subtree requires root_provision_id")
+            return self._search_in_subtree(
+                store,
+                self._clean(
+                    {"root_provision_id": root, "query": query,
+                     "applicable_time": applicable_time.isoformat(), "cursor": cursor}
+                ),
+            )
+        if mode in {"semantic", "meaning"}:
+            if not self.spec_available("semantic_search"):
+                raise ToolArgumentError("semantic search is not configured")
+            return self._semantic_search(
+                store,
+                self._clean(
+                    {"query": query, "applicable_time": applicable_time.isoformat(),
+                     "document": document, "cursor": cursor}
+                ),
+            )
+        if document is not None or page_from is not None or page_to is not None:
+            return self._find_in_document(
+                store,
+                self._clean(
+                    {"query": query, "applicable_time": applicable_time.isoformat(),
+                     "document": document, "page_from": page_from,
+                     "page_to": page_to, "cursor": cursor}
+                ),
+            )
+        return self._search_provisions(
+            store,
+            self._clean(
+                {"query": query, "applicable_time": applicable_time.isoformat(),
+                 "document_scope": scope, "cursor": cursor}
+            ),
+        )
+
+    def _read(self, store: RefStore, args: dict[str, Any]) -> ToolResult:
+        ref = require_str(args, "ref")
+        applicable_time = require_date(args, "applicable_time")
+        offset = optional_int(args, "offset")
+        try:
+            self.canonical.get_provision_version(ref)
+        except NotFoundError:
+            pass
+        else:
+            return self._get_provision_version(
+                store,
+                {"provision_version_id": ref,
+                 "applicable_time": applicable_time.isoformat()},
+            )
+        result = self._read_span(
+            store,
+            self._clean(
+                {"source_span_id": ref,
+                 "applicable_time": applicable_time.isoformat(), "offset": offset}
+            ),
+        )
+        if result.envelope.status is not ToolStatus.NOT_FOUND:
+            return result
+        # Bare provision ids outside the ``prov_`` convention (fixtures, imports)
+        # still resolve to the applicable version's first span.
+        try:
+            versions = self.canonical.applicable_provision_versions(ref, applicable_time)
+        except NotFoundError:
+            versions = ()
+        for version in versions:
+            spans = self.canonical.source_spans_for_version(
+                version.provision_version_id
+            )
+            if spans:
+                return self._read_span(
+                    store,
+                    self._clean(
+                        {
+                            "source_span_id": spans[0].source_span_id,
+                            "applicable_time": applicable_time.isoformat(),
+                            "offset": offset,
+                        }
+                    ),
+                )
+        return result
+
+    def _outline(self, store: RefStore, args: dict[str, Any]) -> ToolResult:
+        ref = require_str(args, "ref")
+        applicable_time = require_date(args, "applicable_time")
+        if ref.startswith("prov_") and not ref.startswith("provv_"):
+            return self._list_children(store, {"provision_id": ref})
+        return self._get_document_structure(
+            store,
+            self._clean(
+                {"document": ref, "applicable_time": applicable_time.isoformat(),
+                 "cursor": optional_cursor(args)}
+            ),
+        )
+
+    def _browse(self, store: RefStore, args: dict[str, Any]) -> ToolResult:
+        query = optional_str(args, "query")
+        applicable_time = require_date(args, "applicable_time")
+        kind = str(args.get("kind") or "").strip().lower()
+        if kind in {"judgment", "opinion", "ruling", "precedent"}:
+            return ToolResult(
+                empty_envelope(
+                    store,
+                    ToolStatus.EMPTY,
+                    (
+                        "لایهٔ قضایی در این سطح پیکربندی نشده است؛ "
+                        + "برای آرای وحدت رویه/دیوان از browse(kind=judgment) در سطح گراف استفاده کن.",
+                    ),
+                    meta={"kind": kind},
+                )
+            )
+        return self._list_documents(
+            store,
+            self._clean(
+                {"query": query, "applicable_time": applicable_time.isoformat()}
+            ),
+        )
+
+    def _versions(self, store: RefStore, args: dict[str, Any]) -> ToolResult:
+        provision_id = require_str(args, "provision_id")
+        applicable_time = require_date(args, "applicable_time")
+        history = bool(args.get("history"))
+        payload = {
+            "provision_id": provision_id,
+            "applicable_time": applicable_time.isoformat(),
+        }
+        return (
+            self._get_version_history(store, payload)
+            if history
+            else self._temporal_check(store, payload)
+        )
+
+    def _neighbors(self, store: RefStore, args: dict[str, Any]) -> ToolResult:
+        ref = require_str(args, "ref")
+        applicable_time = require_date(args, "applicable_time")
+        if ref.startswith("inst_"):
+            return self._get_statute_family(
+                store,
+                {"instrument": ref,
+                 "applicable_time": applicable_time.isoformat()},
+            )
+        return self._get_related(
+            store,
+            {"provision_id": ref,
+             "applicable_time": applicable_time.isoformat()},
+        )
+
+    def _family(self, store: RefStore, args: dict[str, Any]) -> ToolResult:
+        instrument = require_str(args, "instrument")
+        applicable_time = require_date(args, "applicable_time")
+        return self._get_statute_family(
+            store,
+            {"instrument": instrument,
+             "applicable_time": applicable_time.isoformat()},
+        )
 
     # ------------------------------------------------------------------ tools
 
@@ -1527,32 +1798,36 @@ class LegalResearchTools:
                 version, applicable_time
             ):
                 entry["applies"] = True
-        rows = []
+        rows: list[tuple[int, dict[str, Any]]] = []
         for entry in instruments.values():
+            score = 0
             if query_tokens:
-                metadata = search_tokens(
-                    " ".join(
-                        filter(
-                            None,
-                            (
-                                entry["title"],
-                                entry["canonical_title"],
-                                entry["subject_domain"] or "",
-                                entry["issuer"] or "",
-                            ),
-                        )
-                    )
+                score = (
+                    4 * len(query_tokens & search_tokens(entry["title"] or ""))
+                    + 4 * len(query_tokens & search_tokens(entry["canonical_title"] or ""))
+                    + 3 * len(query_tokens & search_tokens(entry["subject_domain"] or ""))
+                    + 1 * len(query_tokens & search_tokens(entry["issuer"] or ""))
                 )
-                if not query_tokens & metadata:
+                if score <= 0:
                     continue
-            rows.append(entry)
-        rows.sort(key=lambda entry: entry["instrument_id"])
+            rows.append((score, entry))
+        # Relevance first: a bare OR over issuer/domain made ``browse`` return
+        # hundreds of unrelated laws and the target instrument never surfaced in
+        # the first page (A005 trace).
+        rows.sort(
+            key=lambda pair: (
+                -pair[0],
+                len(pair[1]["title"] or ""),
+                pair[1]["instrument_id"],
+            )
+        )
         items = []
-        for entry in rows:
+        for _score, entry in rows:
             versions = sorted(entry["document_version_ids"])
             items.append(
                 {
                     "instrument_id": entry["instrument_id"],
+                    "ref": entry["instrument_id"],
                     "title": entry["title"],
                     "instrument_type": entry["instrument_type"],
                     "subject_domain": entry["subject_domain"],
@@ -1580,7 +1855,10 @@ class LegalResearchTools:
             total_count=len(items),
             meta={
                 "applicable_time": applicable_time.isoformat(),
-                "hint": "برای فهرست مواد یک سند، list_document_contents را صدا بزنید.",
+                "hint": (
+                    "برای نقشهٔ ساختاری، outline(ref=instrument_id) و برای "
+                    "جست‌وجوی داخل سند، search(document=instrument_id) را صدا بزن."
+                ),
             },
         )
         return ToolResult(envelope)

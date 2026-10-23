@@ -375,13 +375,43 @@ def _connect_laws_graph(settings: Settings) -> Any:
 #: remain callable for back-compat and direct use.
 _PLANNER_HIDDEN_TOOLS: frozenset[str] = frozenset(
     {
-        "list_document_contents",  # covered by get_document_structure / list_children
-        "get_provision_version",  # covered by read_span
-        "find_nodes",  # covered by search_laws
-        "list_provisions",  # covered by get_document_structure / list_children
-        "node_neighbors",  # covered by get_related
-        "find_paths",  # covered by get_related
-        "graph_stats",  # rarely needed by the research agent
+        # Legacy fine-grained canonical surface: the planner sees the unified
+        # search/read/outline/browse/versions/neighbors/family surface instead.
+        "search_provisions",
+        "get_provision_version",
+        "get_version_history",
+        "get_references",
+        "temporal_check",
+        "aggregate_count",
+        "find_in_document",
+        "read_span",
+        "list_document_contents",
+        "list_children",
+        "search_in_subtree",
+        "get_document_structure",
+        "list_documents",
+        "get_statute_family",
+        "get_related",
+        "expand_search_terms",
+        "semantic_search",
+        # Legacy graph surface (available internally through unified routing).
+        "find_nodes",
+        "list_provisions",
+        "node_neighbors",
+        "find_paths",
+        "graph_stats",
+        "search_laws",
+        "get_provision_text",
+        "search_judgments",
+        "judgments_for_law",
+        "get_judgment_text",
+        "run_cypher",
+        # Legacy tree/notebook surface: folded into navigate().
+        "list_tree",
+        "walk_tree",
+        "notebook_index",
+        "open_notebook",
+        "notebook_route",
     }
 )
 
