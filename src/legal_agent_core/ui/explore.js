@@ -11,6 +11,8 @@ const ex = {
   keepIsolates: false,
   centerNodeId: null, // expanded node stays pinned to the view center
   lastExpand: null,   // {ident, depth, avoid} while the view is an expansion
+  expandDepth: 1,     // keep the depth control stable across panel re-renders
+  expandAvoid: true,  // same for the «avoid constitution» option
 };
 
 const cy = { view: "graph" };
@@ -305,11 +307,13 @@ function showNodeDetails(key) {
       <h4>گسترش همسایه‌ها</h4>
       <div class="ex-row ex-row-flat">
         <label>عمق</label>
-        <select id="ex-expand-depth"><option>1</option><option>2</option><option>3</option></select>
+        <select id="ex-expand-depth">${[1, 2, 3].map((d) =>
+          `<option value="${d}"${ex.expandDepth === d ? " selected" : ""}>${d}</option>`
+        ).join("")}</select>
         <button id="ex-expand">گسترش مفهومی</button>
         <button id="ex-expand-explicit" title="فقط ارجاع/اثر صریح بین متون (ارجاع صریح، اصلاح، نسخ، ابطال و…)؛ بدون یال‌های مفهومی مثل دامنه">گسترش صریح</button>
       </div>
-      <label class="ex-avoid"><input type="checkbox" id="ex-expand-avoid" checked> برای عمق ۲+ از مسیر «قانون اساسی» عبور نکن</label>
+      <label class="ex-avoid"><input type="checkbox" id="ex-expand-avoid"${ex.expandAvoid ? " checked" : ""}> برای عمق ۲+ از مسیر «قانون اساسی» عبور نکن</label>
       ${ident ? "" : '<div class="muted">این گره شناسه‌ی قابل‌گسترش ندارد.</div>'}
     </div>
     <div class="card"><h4>همسایه‌ها (${neighbors.length})</h4>
@@ -326,12 +330,18 @@ function showNodeDetails(key) {
     </div>`;
   const expandBtn = byId("ex-expand");
   if (expandBtn && ident) {
+    const depthSelect = byId("ex-expand-depth");
+    const avoidBox = byId("ex-expand-avoid");
+    depthSelect.onchange = () => {
+      ex.expandDepth = Math.min(Math.max(Number(depthSelect.value) || 1, 1), 3);
+    };
+    avoidBox.onchange = () => { ex.expandAvoid = avoidBox.checked; };
     const run = (mode) => {
       setExpandMode(mode);
       return expandNode(
         ident,
-        Number(byId("ex-expand-depth").value),
-        byId("ex-expand-avoid").checked,
+        Number(depthSelect.value),
+        avoidBox.checked,
         mode,
       );
     };
@@ -653,7 +663,13 @@ function wireCypherConsole() {
  * the path is written out node-by-node so intermediate nodes can be filtered:
  * the constitution (tier 1) is a hub, so a plain `*2` traversal reaches almost
  * everything through it. The predicate keeps only paths that reach distance 2
- * (or 3) WITHOUT using the constitution as a bridge. */
+ * (or 3) WITHOUT using the constitution as a bridge.
+ *
+ * Cycles are excluded on purpose: the mirror may carry reciprocal edges
+ * (IMPLEMENTS/REPEALS both ways, or CONTAINS + PART_OF), so an undirected
+ * 2-hop walk trivially returns to `n`. Without `m <> n` those self-paths eat
+ * the whole LIMIT and the visible depth-2 neighbourhood collapses to a few
+ * nodes. */
 function expandQuery(ident, depth, rels, avoidConstitution, labels = null) {
   const lit = String(ident.value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
   const match = ident.key === "id" ? `n.id = '${lit}'` : `n.name = '${lit}'`;
@@ -667,13 +683,15 @@ function expandQuery(ident, depth, rels, avoidConstitution, labels = null) {
     const conds = [];
     for (let i = 1; i < depth; i += 1) {
       chain.push(`${rel}-(x${i})`);
-      conds.push(`(x${i}.tier IS NULL OR x${i}.tier <> '1')`);
+      conds.push(`(x${i}.tier IS NULL OR x${i}.tier <> '1')`, `x${i} <> n`);
     }
     chain.push(`${rel}-(m)`);
+    conds.push("m <> n");
     return `MATCH (n) WHERE ${match}\nMATCH p=${chain.join("")}\nWHERE ${conds.join(" AND ")}${labelCond}\nRETURN p\nLIMIT 800`;
   }
-  const where = labelCond ? `\nWHERE${labelCond.slice(4)}` : "";
-  return `MATCH (n) WHERE ${match}\nMATCH p=(n)-[:${rels.join("|")}*1..${depth}]-(m)${where}\nRETURN p\nLIMIT 800`;
+  const conds = ["n <> m"];
+  if (labelCond) conds.push(labelCond.slice(5));
+  return `MATCH (n) WHERE ${match}\nMATCH p=(n)-[:${rels.join("|")}*1..${depth}]-(m)\nWHERE ${conds.join(" AND ")}\nRETURN p\nLIMIT 800`;
 }
 
 async function expandNode(ident, depth, avoidConstitution = false, mode = "conceptual") {
@@ -684,10 +702,11 @@ async function expandNode(ident, depth, avoidConstitution = false, mode = "conce
   if (!rels.length) { setStatus("حداقل یک نوع رابطه انتخاب کن"); return; }
   const d = Math.min(Math.max(Number(depth) || 1, 1), 3);
   const avoid = Boolean(avoidConstitution) && d > 1;
-  // fetch WITHOUT the label predicate so every type in range lands in memory
-  // and the sidebar checkboxes can toggle it instantly; the drawer text mirrors
-  // the checkbox state instead, so اجرا reproduces the filtered view.
-  const fetchQ = expandQuery(ident, d, rels, avoid);
+  ex.expandDepth = d;
+  ex.expandAvoid = Boolean(avoidConstitution);
+  // The same query drives the editor and the fetch: terminal nodes are limited
+  // to the checked node types, otherwise hundreds of Provision endpoints would
+  // consume the LIMIT and the rendered depth-2 neighbourhood would look empty.
   const q = expandQuery(ident, d, rels, avoid, checkedLabels());
   byId("cy-input").value = q;
   saveQuery(q);
@@ -695,7 +714,7 @@ async function expandNode(ident, depth, avoidConstitution = false, mode = "conce
   try {
     // replace the whole view with this node's neighbourhood, traversing only
     // the relationship types currently checked (undirected)
-    const payload = await cypher(fetchQ, {}, 2000);
+    const payload = await cypher(q, {}, 2000);
     ex.nodes.clear(); ex.edges.clear();
     for (const row of payload.rows) collectCell(row[0]);
     ex.lastExpand = { ident, depth: d, avoid, mode, query: q };
