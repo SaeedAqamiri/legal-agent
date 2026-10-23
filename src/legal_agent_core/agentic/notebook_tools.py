@@ -11,6 +11,7 @@ from typing import Any
 
 from ..notebook import NotebookPage, NotebookRoute
 from ..repositories import NotebookRepository
+from ..retrieval import search_tokens
 from .envelope import RefStore, ToolStatus, empty_envelope, make_envelope
 from .graph_tools import GraphToolError, require_str
 from .tools import ToolSpec
@@ -30,7 +31,7 @@ NOTEBOOK_TOOL_SPECS: tuple[ToolSpec, ...] = (
         "notebook_route",
         "مسیرهای پژوهش ثبت‌شده برای یک موضوع، مرتب بر اساس confirmed_hits (هر مسیر status دارد؛ "
         "candidate یعنی هنوز بازبینی نشده) — کوتاه‌کنندهٔ ناوبری، نه استناد",
-        ("topic_id",),
+        ("topic_id", "query?"),
     ),
 )
 
@@ -43,6 +44,19 @@ class NotebookTools:
     def __init__(self, repository: NotebookRepository, organization_id: str) -> None:
         self.repository = repository
         self.organization_id = organization_id
+        self._pages_cache: dict[str, NotebookPage] | None = None
+
+    def page(self, node_id: str) -> NotebookPage | None:
+        """Page for a tree node (used by layer-by-layer navigation)."""
+        return self.page_map().get(node_id)
+
+    def page_map(self) -> dict[str, NotebookPage]:
+        if self._pages_cache is None:
+            self._pages_cache = {
+                page.node_id: page
+                for page in self.repository.pages(self.organization_id)
+            }
+        return self._pages_cache
 
     def dispatch(self, store: RefStore, name: str, args: dict[str, Any]) -> Any:
         if name not in NOTEBOOK_TOOL_NAMES:
@@ -89,17 +103,63 @@ class NotebookTools:
 
     def _notebook_route(self, store: RefStore, args: dict[str, Any]) -> Any:
         topic_id = require_str(args, "topic_id")
+        query = args.get("query")
         routes = self.repository.routes(self.organization_id, topic_id)
         if not routes:
             return empty_envelope(
                 store, ToolStatus.EMPTY, (f"برای موضوع {topic_id!r} مسیر ثبت‌شده‌ای نیست",)
             )
-        items = tuple(self._route(r) for r in routes)
+        query_tokens: frozenset[str] = frozenset()
+        questions: dict[str, str] = {}
+        if isinstance(query, str) and query.strip():
+            query_tokens = search_tokens(query)
+            episode_ids = tuple(
+                route.source_episode_id
+                for route in routes
+                if route.source_episode_id
+            )
+            questions = self.repository.episode_questions(
+                self.organization_id, episode_ids
+            )
+        scored: list[tuple[float, NotebookRoute, str | None]] = []
+        for route in routes:
+            source_question = questions.get(route.source_episode_id or "")
+            match = 0.0
+            if query_tokens and source_question:
+                source_tokens = search_tokens(source_question)
+                union = query_tokens | source_tokens
+                match = len(query_tokens & source_tokens) / max(1, len(union))
+            scored.append((match, route, source_question or None))
+        if query_tokens and any(match > 0 for match, _route, _question in scored):
+            scored.sort(
+                key=lambda item: (
+                    -item[0],
+                    -item[1].confirmed_hits,
+                    -item[1].weight,
+                )
+            )
+        else:
+            scored.sort(
+                key=lambda item: (-item[1].confirmed_hits, -item[1].weight)
+            )
+        items = tuple(
+            self._route(
+                route,
+                match=match if query_tokens else None,
+                source_question=source_question,
+            )
+            for match, route, source_question in scored
+        )
         return make_envelope(store, items, total_count=len(items))
 
     @staticmethod
-    def _route(route: NotebookRoute) -> dict[str, Any]:
-        return {
+    def _route(
+        route: NotebookRoute,
+        *,
+        match: float | None = None,
+        source_question: str | None = None,
+    ) -> dict[str, Any]:
+        item: dict[str, Any] = {
             "topic_id": route.topic_id,
             "to_node_id": route.to_node_id,
             "weight": round(route.weight, 3),
@@ -107,6 +167,11 @@ class NotebookTools:
             "confirmed_hits": route.confirmed_hits,
             "status": route.status,
         }
+        if match is not None:
+            item["match"] = round(match, 3)
+        if source_question:
+            item["source_question"] = source_question[:220]
+        return item
 
 
 __all__ = ["NOTEBOOK_TOOL_NAMES", "NOTEBOOK_TOOL_SPECS", "NotebookPage", "NotebookTools"]

@@ -289,6 +289,20 @@ class ResearchApplicationService:
                     confirmed=True,
                     source_episode_id=outcome.episode.episode_id,
                 )
+                # Also record at the instrument level so a later visit to the
+                # same law can jump straight to the article instead of walking
+                # the domain notes again.
+                if node_id.startswith("prov_"):
+                    instrument_id = self._instrument_of(node_id)
+                    if instrument_id and instrument_id != topic_id:
+                        self.notebook.upsert_route(
+                            organization_id,
+                            instrument_id,
+                            node_id,
+                            hit=True,
+                            confirmed=True,
+                            source_episode_id=outcome.episode.episode_id,
+                        )
             self._capture_relations(outcome, organization_id)
         except Exception:  # capture is best-effort
             logging.getLogger(__name__).warning("notebook capture failed", exc_info=True)

@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import os
 import queue
 import re
 import threading
@@ -444,7 +445,9 @@ class ToolResearchLoop:
         self.last_trace = ()
         self.last_planner_trace = ()
         deadline = time.monotonic() + self.config.wall_seconds
-        self._seed_orientation(state, question, applicable_time, progress, deadline)
+        self._seed_orientation(
+            state, question, applicable_time, progress, deadline, ledger
+        )
         system_prompt = augment_system_prompt(self._system_prompt(), question)
         draft: DraftAnswer | None = None
         report = None
@@ -734,12 +737,17 @@ class ToolResearchLoop:
                     # episode burned 5+ planner turns re-deriving what a single
                     # read_span does deterministically.
                     opened_ids: list[str] = []
-                    known_provisions = {
-                        entry.evidence.provision_id for entry in ledger.entries
+                    known_evidence = {
+                        entry.evidence.provision_id: entry.evidence.evidence_id
+                        for entry in ledger.entries
                     }
                     for issue in unfollowed[:2]:
                         target = issue.target_id
-                        if target in known_provisions:
+                        if target in known_evidence:
+                            # The evidence is already in the ledger; point the
+                            # planner at it instead of silently skipping and
+                            # letting it answer without the citation again.
+                            opened_ids.append(known_evidence[target])
                             continue
                         self._run_tool_step(
                             "read_span",
@@ -1338,6 +1346,21 @@ class ToolResearchLoop:
                 "اگر هیچ مسیر معنادار دیگری نمانده، امتناع مستدل بده."
             )
         if not state.evidence_memory:
+            learned = [
+                item
+                for item in state.orientation_targets
+                if item.get("confidence") == "learned"
+            ]
+            if learned:
+                target = learned[0]
+                ref = target.get("target_id")
+                action = "read" if target.get("kind") == "provision" else "outline"
+                return (
+                    "مرحلهٔ فعلی: یک مسیر آموختهٔ تأییدشده از پژوهش قبلی داری. "
+                    f"اول `{action}(ref=\"{ref}\")` را امتحان کن؛ اگر به پرسش "
+                    "مرتبط بود همان را ادامه بده و اگر نبود یک جست‌وجوی محدود "
+                    "با مفهوم حقوقی متفاوت انجام بده."
+                )
             if state.orientation_targets:
                 has_strong = any(
                     item.get("confidence") == "strong"
@@ -1667,6 +1690,7 @@ class ToolResearchLoop:
         applicable_time: Any,
         progress: Any,
         deadline: float,
+        ledger: EvidenceLedger,
     ) -> None:
         """Prepend a deterministic orientation map to the transcript.
 
@@ -1678,24 +1702,38 @@ class ToolResearchLoop:
         blocks: list[str] = []
         walk = self._safe_tool(
             state,
-            "walk_tree",
-            {"topic": question, "limit": 5},
+            "navigate",
+            {"mode": "path", "topic": question, "limit": 5},
             timeout_seconds=min(1.0, max(0.001, deadline - time.monotonic())),
         )
         if walk is not None and walk.status is ToolStatus.OK and walk.items:
             lines = []
+            weak_paths: list[str] = []
+            domain_id: str | None = None
             for item in walk.items:
-                path = " / ".join(step.get("label") or "?" for step in item.get("path", []))
+                path_steps = item.get("path", [])
+                path = " / ".join(
+                    step.get("label") or "?" for step in path_steps
+                )
+                for step in path_steps:
+                    if step.get("kind") == "domain" and step.get("id"):
+                        domain_id = str(step["id"])
                 target_id = item.get("target_id")
                 target_label = item.get("target_label")
                 kind = item.get("kind")
                 confidence = item.get("route_confidence", "weak")
                 matched = ", ".join(item.get("matched_tokens") or [])
+                if confidence != "strong" or not isinstance(target_id, str):
+                    # Weak token matches are worse than no map: they sent the
+                    # Q042 trace to an unrelated labour document for 17 steps.
+                    if path:
+                        weak_paths.append(path)
+                    continue
                 lines.append(
                     f"- target_id={target_id} | kind={kind} | confidence={confidence} "
                     f"| matched={matched or '-'} | title={target_label} | path={path}"
                 )
-                if isinstance(target_id, str) and isinstance(target_label, str):
+                if isinstance(target_label, str):
                     state.orientation_targets.append(
                         {
                             "target_id": target_id,
@@ -1705,24 +1743,297 @@ class ToolResearchLoop:
                         }
                     )
             if lines:
-                blocks.append("مسیر(های) درخت مفهومی برای این موضوع:\n" + "\n".join(lines))
+                blocks.append("مسیر(های) مطمئن درخت مفهومی برای این موضوع:\n" + "\n".join(lines))
+            elif weak_paths:
+                blocks.append(
+                    "مسیر مطمئنی در درخت برای این موضوع پیدا نشد؛ فقط نزدیک‌ترین "
+                    "مسیرهای موضوعی را برای جهت‌گیری ببین (target_id نده و به آن‌ها "
+                    "به‌عنوان سند منتخب تکیه نکن):\n- "
+                    + "\n- ".join(dict.fromkeys(weak_paths[:3]))
+                )
+            # Root layer notes: the first step of the layer-by-layer descent.
+            # The model sees each branch's notebook digest and score, so it can
+            # choose a subtree instead of guessing a global query.
+            layer = self._safe_tool(
+                state,
+                "navigate",
+                {"mode": "children", "node_id": "root", "query": question},
+                timeout_seconds=min(2.0, max(0.001, deadline - time.monotonic())),
+            )
+            if layer is not None and layer.status is ToolStatus.OK and layer.items:
+                children = layer.items[0].get("children") or []
+                top = [item for item in children if int(item.get("score") or 0) > 0][:3]
+                if not top:
+                    top = children[:3]
+                if top:
+                    layer_lines = []
+                    for item in top:
+                        layer_lines.append(
+                            f"- {item.get('id')} | kind={item.get('kind')} "
+                            f"| score={item.get('score')} | {item.get('label')}"
+                            + (
+                                f" | یادداشت: {str(item.get('page_summary') or '')[:110]}"
+                                if item.get("page_summary")
+                                else ""
+                            )
+                        )
+                    blocks.append(
+                        "لایهٔ اول — شاخه‌ها (برای پیمایش لایه‌به‌لایه):\n"
+                        + "\n".join(layer_lines)
+                        + "\nدر هر لایه یادداشت فرزندان را بخوان و با "
+                        "`navigate(mode=children, node_id=<id>, query=سؤال)` "
+                        "یک سطح پایین برو؛ لازم نیست کل مسیر را یک‌جا حدس بزنی."
+                    )
+                    # Deterministic one-level-at-a-time descent using the
+                    # notebook summaries; this is the executable version of
+                    # "root notes → branch notes → domain notes → instrument".
+                    branch_id = str(top[0].get("id") or "")
+                    if branch_id:
+                        branch_layer = self._safe_tool(
+                            state,
+                            "navigate",
+                            {
+                                "mode": "children",
+                                "node_id": branch_id,
+                                "query": question,
+                            },
+                            timeout_seconds=min(
+                                2.0, max(0.001, deadline - time.monotonic())
+                            ),
+                        )
+                        domain_children = (
+                            branch_layer.items[0].get("children", [])
+                            if branch_layer is not None
+                            and branch_layer.status is ToolStatus.OK
+                            and branch_layer.items
+                            else []
+                        )
+                        if domain_children:
+                            domain_top = sorted(
+                                domain_children,
+                                key=lambda item: -int(item.get("score") or 0),
+                            )[:2]
+                            descent = [
+                                (
+                                    f"- شاخه: {top[0].get('label')} | "
+                                    f"{str(top[0].get('page_summary') or '')[:90]}"
+                                )
+                            ]
+                            for item in domain_top:
+                                descent.append(
+                                    f"  - دامنه: {item.get('label')} | "
+                                    f"score={item.get('score')} | "
+                                    f"{str(item.get('page_summary') or '')[:90]}"
+                                )
+                            domain_id_top = str(
+                                domain_top[0].get("id") or ""
+                            ) if domain_top else ""
+                            if domain_id_top:
+                                instrument_layer = self._safe_tool(
+                                    state,
+                                    "navigate",
+                                    {
+                                        "mode": "children",
+                                        "node_id": domain_id_top,
+                                        "query": question,
+                                    },
+                                    timeout_seconds=min(
+                                        2.0,
+                                        max(0.001, deadline - time.monotonic()),
+                                    ),
+                                )
+                                instrument_children = (
+                                    instrument_layer.items[0].get("children", [])
+                                    if instrument_layer is not None
+                                    and instrument_layer.status is ToolStatus.OK
+                                    and instrument_layer.items
+                                    else []
+                                )
+                                for item in sorted(
+                                    instrument_children,
+                                    key=lambda child: -int(
+                                        child.get("score") or 0
+                                    ),
+                                )[:3]:
+                                    descent.append(
+                                        f"    - سند: {item.get('label')} | "
+                                        f"score={item.get('score')} | "
+                                        f"{str(item.get('page_summary') or '')[:90]}"
+                                    )
+                            blocks.append(
+                                "مسیر پیشنهادی لایه‌به‌لایه (بر اساس یادداشت هر لایه):\n"
+                                + "\n".join(descent)
+                                + "\nاین مسیر از یادداشت‌ها ساخته شده و شاهد نیست؛ "
+                                "برای استناد، متن سند/ماده را باز کن."
+                            )
+            # Learned routes are the opencode-notebook equivalent: the first
+            # similar question has none, but once a verified answer recorded a
+            # route, later questions in the same domain can jump straight to the
+            # provision/instrument that answered it.
+            if domain_id and os.environ.get("LEGAL_AGENT_NOTEBOOK_ROUTES", "1") != "0":
+                routes = self._safe_tool(
+                    state,
+                    "navigate",
+                    {"mode": "routes", "topic": domain_id, "query": question},
+                    timeout_seconds=min(2.0, max(0.001, deadline - time.monotonic())),
+                )
+                if routes is not None and routes.status is ToolStatus.OK and routes.items:
+                    confirmed = [
+                        item
+                        for item in routes.items
+                        if int(item.get("confirmed_hits") or 0) > 0
+                        and item.get("to_node_id")
+                    ]
+                    if confirmed:
+                        route_lines = []
+                        for item in confirmed[:2]:
+                            target = str(item["to_node_id"])
+                            kind = "provision" if target.startswith("prov_") else "instrument"
+                            source_question = str(item.get("source_question") or "")
+                            route_lines.append(
+                                f"- {target} | kind={kind} | confirmed_hits={item.get('confirmed_hits')} "
+                                f"| match={item.get('match', '-')} | status={item.get('status')}"
+                                + (f" | از سؤال: «{source_question[:90]}»" if source_question else "")
+                            )
+                            state.orientation_targets.insert(
+                                0,
+                                {
+                                    "target_id": target,
+                                    "title": target,
+                                    "kind": kind,
+                                    "confidence": "learned",
+                                },
+                            )
+                        # The best learned provision is pre-read so its current
+                        # text (and evidence_id) is available immediately; this
+                        # is the note-plugin shortcut: a later similar question
+                        # skips the discovery steps.
+                        provision_targets = [
+                            str(item["to_node_id"])
+                            for item in confirmed
+                            if str(item["to_node_id"]).startswith("prov_")
+                        ]
+                        top_target = provision_targets[0] if provision_targets else None
+                        if top_target is not None:
+                            route_lines.insert(
+                                0,
+                                f"- اقدام پیشنهادی: اول `read(ref={top_target})` را "
+                                "ببین؛ این مسیر قبلاً با پاسخ تأییدشده ثبت شده است.",
+                            )
+                            preview = self._safe_tool(
+                                state,
+                                "read",
+                                {
+                                    "ref": top_target,
+                                    "applicable_time": applicable_time.isoformat(),
+                                },
+                                timeout_seconds=min(
+                                    3.0, max(0.001, deadline - time.monotonic())
+                                ),
+                                full=True,
+                            )
+                            if (
+                                preview is not None
+                                and preview.envelope.status is ToolStatus.OK
+                                and preview.envelope.items
+                            ):
+                                for evidence in preview.evidence:
+                                    ledger.add(evidence)
+                                item = preview.envelope.items[0]
+                                preview_text = " ".join(
+                                    str(item.get("text") or "").split()
+                                )[:360]
+                                evidence_id = item.get("evidence_id")
+                                route_lines.append(
+                                    f"  پیش‌نمایش مسیر: {item.get('instrument_title')} | "
+                                    f"{item.get('label')} | {preview_text}"
+                                    + (
+                                        f" | evidence_id={evidence_id}"
+                                        if evidence_id
+                                        else ""
+                                    )
+                                )
+                        blocks.insert(
+                            0,
+                            "مسیر(های) آموختهٔ تأییدشده برای این موضوع (کوتاه‌کننده، نه شاهد):\n"
+                            + "\n".join(route_lines)
+                            + "\nاول نزدیک‌ترین مسیر را با "
+                            "`read(ref=...)` (اگر provision است) یا "
+                            "`outline(ref=...)` (اگر instrument است) باز کن؛ "
+                            "اگر پیش‌نمایش بالا مرتبط بود، همان evidence_id را می‌توانی "
+                            "مستند کنی؛ اگر مرتبط نبود، مسیر درخت/جست‌وجو را ادامه بده.",
+                        )
             # Pre-open the best instrument outline. This turns the orientation
             # from a prose suggestion into an actionable document route without
             # spending another model decision.
-            first = state.orientation_targets[0] if state.orientation_targets else None
+            learned_first = next(
+                (
+                    item
+                    for item in state.orientation_targets
+                    if item.get("confidence") == "learned"
+                ),
+                None,
+            )
+            first = learned_first or (
+                state.orientation_targets[0] if state.orientation_targets else None
+            )
             best = (
                 first
                 if first is not None
                 and first["kind"] == "instrument"
-                and first["confidence"] == "strong"
+                and first["confidence"] in {"strong", "learned"}
                 else None
             )
             if best is not None:
+                instrument_routes = self._safe_tool(
+                    state,
+                    "navigate",
+                    {
+                        "mode": "routes",
+                        "topic": best["target_id"],
+                        "query": question,
+                    },
+                    timeout_seconds=min(2.0, max(0.001, deadline - time.monotonic())),
+                )
+                if (
+                    instrument_routes is not None
+                    and instrument_routes.status is ToolStatus.OK
+                    and instrument_routes.items
+                ):
+                    confirmed = [
+                        item
+                        for item in instrument_routes.items
+                        if int(item.get("confirmed_hits") or 0) > 0
+                        and item.get("to_node_id")
+                    ]
+                    if confirmed:
+                        lines = []
+                        for item in confirmed[:2]:
+                            target = str(item["to_node_id"])
+                            lines.append(
+                                f"- {target} | confirmed_hits={item.get('confirmed_hits')} "
+                                f"| match={item.get('match', '-')}"
+                            )
+                            state.orientation_targets.insert(
+                                0,
+                                {
+                                    "target_id": target,
+                                    "title": target,
+                                    "kind": "provision",
+                                    "confidence": "learned",
+                                },
+                            )
+                        blocks.insert(
+                            0,
+                            "مسیرهای آموختهٔ سطح سند (مقاله‌های همین قانون):\n"
+                            + "\n".join(lines)
+                            + "\nاگر مرتبط بود، مستقیم `read(ref=...)` کن.",
+                        )
                 structure = self._safe_tool(
                     state,
-                    "get_document_structure",
+                    "outline",
                     {
-                        "document": best["target_id"],
+                        "ref": best["target_id"],
                         "applicable_time": applicable_time.isoformat(),
                     },
                     timeout_seconds=min(3.0, max(0.001, deadline - time.monotonic())),
@@ -1732,22 +2043,43 @@ class ToolResearchLoop:
                         "ساختار نامزد اول با شناسهٔ مستقیم:\n"
                         + json.dumps(structure.to_payload(), ensure_ascii=False, sort_keys=True)
                     )
+                else:
+                    blocks.append(
+                        "نکته: ساختار نامزد اول در تاریخ اجرا باز نشد؛ یک گام "
+                        "صرف outline دوباره نکن و با search(document=...) یا "
+                        "جست‌وجوی سراسری ادامه بده."
+                    )
 
-            # Notebook data is a navigation hint only. Open the best candidate
-            # deterministically so a small model need not spend a turn loading
-            # a skill/page before it can act on the route.
-            if best is not None:
+            # Notebook data is a navigation hint only. Prefer the best
+            # instrument page; if it has no page, fall back to the domain page
+            # from the tree path so the learned summary still reaches the model.
+            notebook_node = (
+                best["target_id"] if best is not None else domain_id
+            )
+            notebook = None
+            if notebook_node:
                 notebook = self._safe_tool(
                     state,
-                    "open_notebook",
-                    {"node_id": best["target_id"]},
-                    timeout_seconds=min(1.0, max(0.001, deadline - time.monotonic())),
+                    "navigate",
+                    {"mode": "notebook", "node_id": notebook_node},
+                    timeout_seconds=min(2.0, max(0.001, deadline - time.monotonic())),
                 )
-                if notebook is not None and notebook.status is ToolStatus.OK and notebook.items:
-                    blocks.append(
-                        "راهنمای دفترچه برای نامزد اول (فقط مسیر، نه شاهد):\n"
-                        + json.dumps(notebook.to_payload(), ensure_ascii=False, sort_keys=True)
-                    )
+            if (
+                (notebook is None or notebook.status is not ToolStatus.OK)
+                and domain_id
+                and notebook_node != domain_id
+            ):
+                notebook = self._safe_tool(
+                    state,
+                    "navigate",
+                    {"mode": "notebook", "node_id": domain_id},
+                    timeout_seconds=min(2.0, max(0.001, deadline - time.monotonic())),
+                )
+            if notebook is not None and notebook.status is ToolStatus.OK and notebook.items:
+                blocks.append(
+                    "راهنمای دفترچه (فقط مسیر، نه شاهد):\n"
+                    + json.dumps(notebook.to_payload(), ensure_ascii=False, sort_keys=True)
+                )
         if blocks:
             state.steps.append(
                 _StepRecord(
@@ -1763,7 +2095,15 @@ class ToolResearchLoop:
                     summary="ORIENTATION: actionable tree targets + notebook hint",
                 )
             )
-            _emit(progress, {"type": "orientation", "text": " | ".join(blocks)[:800]})
+            _emit(
+                progress,
+                {
+                    "type": "orientation",
+                    "text": " | ".join(
+                        block.split("\n", 1)[0] for block in blocks
+                    )[:800],
+                },
+            )
 
     def _safe_tool(
         self,
@@ -1772,6 +2112,7 @@ class ToolResearchLoop:
         args: dict[str, Any],
         *,
         timeout_seconds: float = 2.0,
+        full: bool = False,
     ) -> Any:
         available = getattr(self.tools, "spec_available", None)
         if callable(available) and not available(name):
@@ -1780,9 +2121,8 @@ class ToolResearchLoop:
 
         def invoke() -> None:
             try:
-                # Orientation is advisory and never evidence; isolate its refs
-                # so a timed-out worker cannot mutate the live research store.
-                result.put((True, self.tools.dispatch(RefStore(), name, args).envelope))
+                dispatched = self.tools.dispatch(RefStore(), name, args)
+                result.put((True, dispatched if full else dispatched.envelope))
             except Exception as exc:  # noqa: BLE001 - relay below
                 result.put((False, exc))
 

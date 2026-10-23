@@ -175,5 +175,15 @@ class NotebookRepository(ABC):
         self, organization_id: str, topic_id: str | None = None
     ) -> tuple[NotebookRoute, ...]: ...
 
+    def episode_questions(
+        self, organization_id: str, episode_ids: tuple[str, ...]
+    ) -> dict[str, str]:
+        """Source question per confirmed episode, when the store can provide it.
+
+        Optional capability: in-memory/fake stores may omit it. Used to match a
+        new question against the question that produced a learned route.
+        """
+        return {}
+
     @abstractmethod
     def upsert_page(self, page: NotebookPage) -> None: ...

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..retrieval import search_tokens
 from .envelope import RefStore, ToolStatus, empty_envelope, make_envelope
 from .graph_tools import (
     GRAPH_TOOL_SPECS,
@@ -37,7 +38,7 @@ NAVIGATE_SPEC = ToolSpec(
     "ناوبری مفهومی با یک ورودی: mode=path مسیر ریشه→اسناد مرتبط با topic؛ "
     "mode=children فرزندان یک node_id؛ mode=notebook صفحهٔ دفترچه؛ mode=routes مسیرهای "
     "آموختهٔ یک موضوع. این لایه فقط کوتاه‌کنندهٔ مسیر است، نه شاهد.",
-    ("topic?", "node_id?", "mode?", "limit?"),
+    ("topic?", "node_id?", "mode?", "limit?", "query?"),
 )
 
 
@@ -141,6 +142,7 @@ class CompositeTools:
     def _navigate(self, store: RefStore, args: dict[str, Any]) -> Any:
         topic = args.get("topic")
         node_id = args.get("node_id")
+        query = args.get("query")
         mode = str(args.get("mode") or "").strip().lower()
         limit = args.get("limit") or 5
         if not mode:
@@ -156,6 +158,8 @@ class CompositeTools:
         if mode in {"children", "tree", "list"}:
             if self.tree is None:
                 return empty_envelope(store, ToolStatus.ERROR, ("درخت مفهومی پیکربندی نشده است",))
+            if isinstance(query, str) and query.strip() and self.notebook is not None:
+                return self._children_with_notes(store, node_id, query)
             return self.tree.dispatch(
                 store, "list_tree", self._compact({"node_id": node_id})
             )
@@ -165,7 +169,12 @@ class CompositeTools:
             return self.notebook.dispatch(
                 store,
                 "notebook_route",
-                {"topic_id": node_id or topic or ""},
+                self._compact(
+                    {
+                        "topic_id": node_id or topic or "",
+                        "query": args.get("query"),
+                    }
+                ),
             )
         if mode in {"notebook", "page"}:
             if self.notebook is None:
@@ -182,6 +191,60 @@ class CompositeTools:
         return empty_envelope(
             store, ToolStatus.ERROR, (f"unknown navigate mode {mode!r}",)
         )
+
+    def _children_with_notes(
+        self, store: RefStore, node_id: str | None, query: str
+    ) -> Any:
+        """Layer-by-layer descent: children + their notebook notes + a score.
+
+        This is the opencode-notebook shape the agent needs at every level:
+        read the notes of the children, pick the relevant subtree, then call it
+        again for the next level instead of jumping to a global search.
+        """
+        env = self.tree.dispatch(
+            store, "list_tree", self._compact({"node_id": node_id})
+        )
+        if env.status is not ToolStatus.OK or not env.items:
+            return env
+        parent = dict(env.items[0])
+        children = list(parent.get("children") or [])
+        query_tokens = search_tokens(query)
+        enriched: list[dict[str, Any]] = []
+        pages = self.notebook.page_map() if self.notebook is not None else {}
+        for child in children:
+            page_summary = ""
+            child_id = str(child.get("id") or "")
+            page = pages.get(child_id)
+            if page is not None:
+                page_summary = page.summary[:500]
+            blob = " ".join(
+                str(child.get(key) or "")
+                for key in ("label", "title", "summary")
+            ) + " " + page_summary
+            score = (
+                len(query_tokens & search_tokens(blob))
+                if query_tokens
+                else 0
+            )
+            item = dict(child)
+            item["page_summary"] = page_summary
+            item["score"] = score
+            enriched.append(item)
+        if query_tokens:
+            enriched.sort(
+                key=lambda item: (
+                    -int(item.get("score") or 0),
+                    str(item.get("label") or ""),
+                )
+            )
+        parent["children"] = enriched[:12]
+        parent["query"] = query
+        parent["note"] = (
+            "در هر لایه page_summary را بخوان و مرتبط‌ترین فرزند را انتخاب کن؛ "
+            "برای یک سطح پایین‌تر دوباره "
+            "navigate(mode=children, node_id=<id>, query=سؤال) را صدا بزن."
+        )
+        return make_envelope(store, (parent,), total_count=len(children))
 
     def spec_available(self, name: str) -> bool:
         if name in getattr(self.canonical, "hidden_tools", frozenset()):
@@ -346,6 +409,7 @@ class CompositeTools:
             "topic": {"type": "string"},
             "topic_id": {"type": "string"},
             "domain": {"type": "string"},
+            "query": {"type": "string"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 20},
         }
         schemas: list[dict[str, Any]] = []

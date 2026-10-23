@@ -149,6 +149,26 @@ class PostgresNotebookRepository(NotebookRepository):
             for row in rows
         )
 
+    def episode_questions(
+        self, organization_id: str, episode_ids: tuple[str, ...]
+    ) -> dict[str, str]:
+        ids = tuple(dict.fromkeys(episode_ids))
+        if not ids:
+            return {}
+        rows = self._rows(
+            """SELECT episode_id, payload ->> 'question'
+                 FROM notebook.events
+                WHERE organization_id = %s
+                  AND event_type = 'answer_confirmed'
+                  AND episode_id = ANY(%s)""",
+            (organization_id, list(ids)),
+        )
+        return {
+            str(row[0]): str(row[1])
+            for row in rows
+            if row[0] and row[1]
+        }
+
     def upsert_page(self, page: NotebookPage) -> None:
         with self.connection.cursor() as cur:
             cur.execute(
